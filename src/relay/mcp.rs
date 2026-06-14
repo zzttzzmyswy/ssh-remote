@@ -137,6 +137,48 @@ pub async fn messages_handler(
                         }
                     },
                     {
+                        "name": "exec_start",
+                        "description": "Start an interactive command session. Returns exec_id and initial output. The command runs in the background; use exec_input to interact, exec_close to terminate.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "cmd": {"type": "string", "description": "Shell command to execute"}
+                            },
+                            "required": ["cmd"]
+                        }
+                    },
+                    {
+                        "name": "exec_input",
+                        "description": "Send input to a running exec session and get accumulated output.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "exec_id": {"type": "string", "description": "ID of the exec session"},
+                                "data": {"type": "string", "description": "Text to write to stdin"}
+                            },
+                            "required": ["exec_id", "data"]
+                        }
+                    },
+                    {
+                        "name": "exec_close",
+                        "description": "Close an exec session. Kills the process if still running. Returns final output and exit code.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "exec_id": {"type": "string", "description": "ID of the exec session to close"}
+                            },
+                            "required": ["exec_id"]
+                        }
+                    },
+                    {
+                        "name": "exec_list",
+                        "description": "List all active exec sessions with their status.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    {
                         "name": "file_read",
                         "description": "Read the content of a file on the remote machine",
                         "inputSchema": {
@@ -194,6 +236,184 @@ pub async fn messages_handler(
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let arguments = params_obj.get("arguments").unwrap_or(&Value::Null);
+
+            if matches!(tool_name, "exec_start" | "exec_input" | "exec_close" | "exec_list") {
+                let request_id = Uuid::new_v4().to_string();
+
+                let proto_message: crate::proto::Message;
+                let exec_timeout: u64;
+
+                match tool_name {
+                    "exec_start" => {
+                        let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+                        proto_message = crate::proto::Message {
+                            msg_type: "mcp:exec_start".to_string(),
+                            session_id: session_id.clone(),
+                            payload: json!({
+                                "cmd": cmd,
+                                "_mcp_request_id": request_id
+                            }),
+                        };
+                        exec_timeout = 10000;
+                    }
+                    "exec_input" => {
+                        let exec_id = arguments.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let data = arguments.get("data").and_then(|v| v.as_str()).unwrap_or("");
+                        let data_b64 = crate::agent::fs::encode_b64(data.as_bytes());
+                        proto_message = crate::proto::Message {
+                            msg_type: "mcp:exec_input".to_string(),
+                            session_id: session_id.clone(),
+                            payload: json!({
+                                "exec_id": exec_id,
+                                "data_b64": data_b64,
+                                "_mcp_request_id": request_id
+                            }),
+                        };
+                        exec_timeout = 10000;
+                    }
+                    "exec_close" => {
+                        let exec_id = arguments.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
+                        proto_message = crate::proto::Message {
+                            msg_type: "mcp:exec_close".to_string(),
+                            session_id: session_id.clone(),
+                            payload: json!({
+                                "exec_id": exec_id,
+                                "_mcp_request_id": request_id
+                            }),
+                        };
+                        exec_timeout = 5000;
+                    }
+                    "exec_list" => {
+                        proto_message = crate::proto::Message {
+                            msg_type: "mcp:exec_list".to_string(),
+                            session_id: session_id.clone(),
+                            payload: json!({
+                                "_mcp_request_id": request_id
+                            }),
+                        };
+                        exec_timeout = 5000;
+                    }
+                    _ => unreachable!(),
+                }
+
+                let (tx, rx) = oneshot::channel();
+
+                {
+                    let mut pending = state.pending_mcp.write().await;
+                    pending.insert(request_id.clone(), (session_id.clone(), tx));
+                }
+
+                {
+                    let agent_tx_option = {
+                        let broadcast = state.agent_broadcast.read().await;
+                        broadcast
+                            .get(&session_id)
+                            .and_then(|cm| cm.senders.first().cloned())
+                    };
+
+                    match agent_tx_option {
+                        Some(agent_tx) => {
+                            let text = serde_json::to_string(&proto_message).unwrap_or_default();
+                            let _ = agent_tx.send(text);
+                        }
+                        None => {
+                            let mut pending = state.pending_mcp.write().await;
+                            pending.remove(&request_id);
+                            return Json(json!({
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "result": {
+                                    "content": [{
+                                        "type": "text",
+                                        "text": "Error: No agent connected for this session"
+                                    }],
+                                    "isError": true
+                                }
+                            }))
+                            .into_response();
+                        }
+                    }
+                }
+
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(exec_timeout),
+                    rx,
+                )
+                .await
+                {
+                    Ok(Ok(result)) => {
+                        let value: Value = serde_json::from_str(&result).unwrap_or_default();
+                        let stdout = value
+                            .get("stdout")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let stderr = value
+                            .get("stderr")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let status = value
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let exit_code = value
+                            .get("exit_code")
+                            .and_then(|v| v.as_i64());
+
+                        let mut text = format!("Status: {}\n", status);
+                        if let Some(code) = exit_code {
+                            text.push_str(&format!("Exit code: {}\n", code));
+                        }
+                        if !stdout.is_empty() {
+                            if let Some(decoded) = crate::agent::fs::decode_b64(stdout) {
+                                if let Ok(s) = String::from_utf8(decoded) {
+                                    text.push_str(&s);
+                                }
+                            }
+                        }
+                        if !stderr.is_empty() {
+                            if let Some(decoded) = crate::agent::fs::decode_b64(stderr) {
+                                if let Ok(s) = String::from_utf8(decoded) {
+                                    text.push_str(&format!("\n[stderr]\n{}", s));
+                                }
+                            }
+                        }
+
+                        let exec_id_val = value
+                            .get("exec_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": text.trim()
+                                }],
+                                "exec_id": exec_id_val
+                            }
+                        }))
+                        .into_response();
+                    }
+                    _ => {
+                        let mut pending = state.pending_mcp.write().await;
+                        pending.remove(&request_id);
+                        return Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": "Error: Request timed out or agent disconnected"
+                                }],
+                                "isError": true
+                            }
+                        }))
+                        .into_response();
+                    }
+                }
+            }
 
             let (msg_type, payload) = match tool_name {
                 "exec" => {

@@ -187,18 +187,22 @@ async fn handle_agent(
                         }
                     }
 
-                    if proto_msg.msg_type == "mcp:result" {
+                    if proto_msg.msg_type == "mcp:result" || proto_msg.msg_type == "mcp:exec_result" {
                         if let Some(request_id) = proto_msg.payload.get("_mcp_request_id")
                             .and_then(|v| v.as_str())
                         {
                             let mut pending = state_clone.pending_mcp.write().await;
                             if let Some((_sid, tx)) = pending.remove(request_id) {
-                                let result_text = serde_json::to_string(&json!({
-                                    "stdout": proto_msg.payload.get("stdout").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "stderr": proto_msg.payload.get("stderr").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "exit_code": proto_msg.payload.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0)
-                                }))
-                                .unwrap_or_default();
+                                let result_text = if proto_msg.msg_type == "mcp:exec_result" {
+                                    serde_json::to_string(&proto_msg.payload).unwrap_or_default()
+                                } else {
+                                    serde_json::to_string(&json!({
+                                        "stdout": proto_msg.payload.get("stdout").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "stderr": proto_msg.payload.get("stderr").and_then(|v| v.as_str()).unwrap_or(""),
+                                        "exit_code": proto_msg.payload.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0)
+                                    }))
+                                    .unwrap_or_default()
+                                };
                                 let _ = tx.send(result_text);
                             }
                         }
