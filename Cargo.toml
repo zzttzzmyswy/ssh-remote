@@ -23,6 +23,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 anyhow = "1"
 thiserror = "1"
 base64 = "0.22"
+tokio-stream = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -47,6 +47,7 @@ pub async fn start(
     _tls_key: Option<String>,
     _dev: bool,
 ) -> anyhow::Result<()> {
+    use axum::routing::get;
     use axum::Router;
     use tower_http::cors::{Any, CorsLayer};
 
@@ -58,7 +59,7 @@ pub async fn start(
         .allow_headers(Any);
 
     let app = Router::new()
-        // .route("/ws", get(ws::ws_handler))
+        .route("/ws", get(ws::ws_handler))
         // .route("/mcp/sse", get(mcp::sse_handler))
         // .route("/mcp/messages", axum::routing::post(mcp::messages_handler))
         .layer(cors)
