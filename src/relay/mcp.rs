@@ -119,14 +119,14 @@ pub async fn messages_handler(
             "result": {
                 "tools": [
                     {
-                        "name": "exec",
-                        "description": "Execute a shell command on the remote machine",
+                        "name": "exec_remote",
+                        "description": "Execute a shell command on the REMOTE TARGET MACHINE (NOT the AI's local sandbox). Returns stdout, stderr, and exit code.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "cmd": {
                                     "type": "string",
-                                    "description": "The shell command to execute"
+                                    "description": "The shell command to execute on the remote machine"
                                 },
                                 "timeout_ms": {
                                     "type": "number",
@@ -137,31 +137,31 @@ pub async fn messages_handler(
                         }
                     },
                     {
-                        "name": "exec_start",
-                        "description": "Start an interactive command session. Returns exec_id and initial output. The command runs in the background; use exec_input to interact, exec_close to terminate.",
+                        "name": "exec_remote_start",
+                        "description": "Start an interactive command session ON THE REMOTE TARGET MACHINE. Returns exec_id and initial output. The command runs in the background; use exec_remote_input to interact, exec_remote_close to terminate.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "cmd": {"type": "string", "description": "Shell command to execute"}
+                                "cmd": {"type": "string", "description": "Shell command to execute on the remote machine"}
                             },
                             "required": ["cmd"]
                         }
                     },
                     {
-                        "name": "exec_input",
-                        "description": "Send input to a running exec session and get accumulated output.",
+                        "name": "exec_remote_input",
+                        "description": "Send input to a running exec session ON THE REMOTE TARGET MACHINE and get accumulated output.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "exec_id": {"type": "string", "description": "ID of the exec session"},
-                                "data": {"type": "string", "description": "Text to write to stdin"}
+                                "data": {"type": "string", "description": "Text to write to the remote process stdin"}
                             },
                             "required": ["exec_id", "data"]
                         }
                     },
                     {
-                        "name": "exec_close",
-                        "description": "Close an exec session. Kills the process if still running. Returns final output and exit code.",
+                        "name": "exec_remote_close",
+                        "description": "Close an exec session ON THE REMOTE TARGET MACHINE. Kills the process if still running. Returns final output and exit code.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -171,54 +171,54 @@ pub async fn messages_handler(
                         }
                     },
                     {
-                        "name": "exec_list",
-                        "description": "List all active exec sessions with their status.",
+                        "name": "exec_remote_list",
+                        "description": "List all active exec sessions on the REMOTE TARGET MACHINE with their status.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {}
                         }
                     },
                     {
-                        "name": "file_read",
-                        "description": "Read the content of a file on the remote machine",
+                        "name": "file_remote_read",
+                        "description": "Read the content of a file from the REMOTE TARGET MACHINE (NOT the AI's local filesystem).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "path": {
                                     "type": "string",
-                                    "description": "Absolute path to the file to read"
+                                    "description": "Absolute path to the file on the remote machine"
                                 }
                             },
                             "required": ["path"]
                         }
                     },
                     {
-                        "name": "file_write",
-                        "description": "Write content to a file on the remote machine",
+                        "name": "file_remote_write",
+                        "description": "Write content to a file on the REMOTE TARGET MACHINE (NOT the AI's local filesystem).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "path": {
                                     "type": "string",
-                                    "description": "Absolute path to the file to write"
+                                    "description": "Absolute path to the file on the remote machine"
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "Content to write to the file"
+                                    "description": "Content to write to the file on the remote machine"
                                 }
                             },
                             "required": ["path", "content"]
                         }
                     },
                     {
-                        "name": "file_list",
-                        "description": "List contents of a directory on the remote machine",
+                        "name": "file_remote_list",
+                        "description": "List contents of a directory on the REMOTE TARGET MACHINE (NOT the AI's local filesystem).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "path": {
                                     "type": "string",
-                                    "description": "Absolute path to the directory to list"
+                                    "description": "Absolute path to the directory on the remote machine"
                                 }
                             },
                             "required": ["path"]
@@ -237,14 +237,14 @@ pub async fn messages_handler(
                 .unwrap_or("");
             let arguments = params_obj.get("arguments").unwrap_or(&Value::Null);
 
-            if matches!(tool_name, "exec_start" | "exec_input" | "exec_close" | "exec_list") {
+            if matches!(tool_name, "exec_remote_start" | "exec_remote_input" | "exec_remote_close" | "exec_remote_list") {
                 let request_id = Uuid::new_v4().to_string();
 
                 let proto_message: crate::proto::Message;
                 let exec_timeout: u64;
 
                 match tool_name {
-                    "exec_start" => {
+                    "exec_remote_start" => {
                         let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
                         proto_message = crate::proto::Message {
                             msg_type: "mcp:exec_start".to_string(),
@@ -256,7 +256,7 @@ pub async fn messages_handler(
                         };
                         exec_timeout = 10000;
                     }
-                    "exec_input" => {
+                    "exec_remote_input" => {
                         let exec_id = arguments.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
                         let data = arguments.get("data").and_then(|v| v.as_str()).unwrap_or("");
                         let data_b64 = crate::agent::fs::encode_b64(data.as_bytes());
@@ -271,7 +271,7 @@ pub async fn messages_handler(
                         };
                         exec_timeout = 10000;
                     }
-                    "exec_close" => {
+                    "exec_remote_close" => {
                         let exec_id = arguments.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
                         proto_message = crate::proto::Message {
                             msg_type: "mcp:exec_close".to_string(),
@@ -283,7 +283,7 @@ pub async fn messages_handler(
                         };
                         exec_timeout = 5000;
                     }
-                    "exec_list" => {
+                    "exec_remote_list" => {
                         proto_message = crate::proto::Message {
                             msg_type: "mcp:exec_list".to_string(),
                             session_id: session_id.clone(),
@@ -416,7 +416,7 @@ pub async fn messages_handler(
             }
 
             let (msg_type, payload) = match tool_name {
-                "exec" => {
+                "exec_remote" => {
                     let cmd = arguments
                         .get("cmd")
                         .and_then(|v| v.as_str())
@@ -431,14 +431,14 @@ pub async fn messages_handler(
                     };
                     ("mcp:exec", payload)
                 }
-                "file_read" => {
+                "file_remote_read" => {
                     let path = arguments
                         .get("path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     ("fs:read", json!({"path": path}))
                 }
-                "file_write" => {
+                "file_remote_write" => {
                     let path = arguments
                         .get("path")
                         .and_then(|v| v.as_str())
@@ -449,7 +449,7 @@ pub async fn messages_handler(
                         .unwrap_or("");
                     ("fs:write", json!({"path": path, "content": content}))
                 }
-                "file_list" => {
+                "file_remote_list" => {
                     let path = arguments
                         .get("path")
                         .and_then(|v| v.as_str())
@@ -517,7 +517,7 @@ pub async fn messages_handler(
             }
 
             let timeout_duration = match tool_name {
-                "exec" => {
+                "exec_remote" => {
                     let timeout_ms = arguments
                         .get("timeout_ms")
                         .and_then(|v| v.as_u64())
