@@ -14,7 +14,8 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive", "env"] }
 portable-pty = "0.8"
-rust-embed = "8"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
 rand = "0.8"
 hex = "0.4"
 tracing = "0.1"

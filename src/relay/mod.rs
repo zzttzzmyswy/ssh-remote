@@ -41,6 +41,32 @@ impl SharedState {
     }
 }
 
+use axum::body::Body;
+use axum::http::{header, StatusCode, Uri};
+use axum::response::Response;
+
+async fn static_handler(uri: Uri) -> Response<Body> {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match crate::web::WebAssets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(Body::from(content.data.into_owned()))
+                .unwrap()
+        }
+        None => {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("Not Found"))
+                .unwrap()
+        }
+    }
+}
+
 pub async fn start(
     bind: String,
     _tls_cert: Option<String>,
@@ -62,6 +88,14 @@ pub async fn start(
         .route("/ws", get(ws::ws_handler))
         .route("/mcp/sse", get(mcp::sse_handler))
         .route("/mcp/messages", axum::routing::post(mcp::messages_handler))
+        .route("/", get(static_handler))
+        .route("/session", get(static_handler))
+        .route("/style.css", get(static_handler))
+        .route("/ws.js", get(static_handler))
+        .route("/term.js", get(static_handler))
+        .route("/files.js", get(static_handler))
+        .route("/session.js", get(static_handler))
+        .fallback(get(static_handler))
         .layer(cors)
         .with_state(state);
 

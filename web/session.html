@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSH Remote - Session</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+</head>
+<body class="session-page">
+    <div id="toolbar">
+        <div class="toolbar-left">
+            <span id="session-name">Session</span>
+            <span id="online-count" class="badge">0 online</span>
+        </div>
+        <div class="toolbar-right">
+            <button id="copy-token-btn" class="btn btn-small" title="Copy token">Copy Token</button>
+            <button id="toggle-files-btn" class="btn btn-small">Files</button>
+        </div>
+    </div>
+    <div class="main-content">
+        <div id="terminal-container"></div>
+        <div id="file-drawer" class="file-drawer hidden">
+            <div class="file-drawer-header">
+                <span>File Manager</span>
+                <button id="close-files-btn" class="btn btn-small">&times;</button>
+            </div>
+            <div id="file-tree" class="file-tree"></div>
+            <div id="file-editor" class="file-editor hidden">
+                <div class="file-editor-header">
+                    <span id="editor-filename"></span>
+                    <div>
+                        <button id="editor-save-btn" class="btn btn-small btn-primary">Save</button>
+                        <button id="editor-close-btn" class="btn btn-small">Close</button>
+                    </div>
+                </div>
+                <textarea id="editor-content" spellcheck="false"></textarea>
+            </div>
+        </div>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+    <div id="disconnect-overlay" class="disconnect-overlay hidden">
+        <div class="disconnect-message">
+            <h2>Agent Disconnected</h2>
+            <p id="disconnect-text">The remote session has ended.</p>
+            <button id="disconnect-ok-btn" class="btn btn-primary">OK</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
+    <script src="/ws.js"></script>
+    <script src="/term.js"></script>
+    <script src="/files.js"></script>
+    <script src="/session.js"></script>
+</body>
+</html>

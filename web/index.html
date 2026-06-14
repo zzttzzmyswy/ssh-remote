@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSH Remote - Connect</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body class="connect-page">
+    <div class="connect-container">
+        <h1>ssh-remote</h1>
+        <p class="subtitle">Collaborative Remote Terminal</p>
+        <div class="connect-form">
+            <label for="token-input">Session Token</label>
+            <input type="text" id="token-input" placeholder="Paste your session token..." autocomplete="off">
+            <div class="button-row">
+                <button id="connect-rw" class="btn btn-primary">Connect (Read-Write)</button>
+                <button id="connect-ro" class="btn btn-secondary">Connect Read-Only</button>
+            </div>
+            <div id="connect-error" class="error-message hidden"></div>
+        </div>
+    </div>
+    <script>
+        const tokenInput = document.getElementById('token-input');
+        const errorDiv = document.getElementById('connect-error');
+
+        function connect(permission) {
+            const token = tokenInput.value.trim();
+            if (!token) {
+                showError('Please enter a session token');
+                return;
+            }
+            const params = new URLSearchParams({ token: token, permission: permission });
+            window.location.href = '/session?' + params.toString();
+        }
+
+        function showError(msg) {
+            errorDiv.textContent = msg;
+            errorDiv.classList.remove('hidden');
+        }
+
+        document.getElementById('connect-rw').addEventListener('click', () => connect('rw'));
+        document.getElementById('connect-ro').addEventListener('click', () => connect('ro'));
+
+        tokenInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') connect('rw');
+        });
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlToken = urlParams.get('token');
+        if (urlToken) {
+            tokenInput.value = urlToken;
+        }
+    </script>
+</body>
+</html>

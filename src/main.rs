@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 mod agent;
 mod proto;
 mod relay;
+mod web;
 
 #[derive(Parser)]
 #[command(name = "ssh-remote", about = "Collaborative remote SSH tool")]
