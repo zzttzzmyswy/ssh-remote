@@ -8,7 +8,7 @@ use std::process::Stdio;
 
 use crate::agent::client::RelayClient;
 use crate::agent::shell::Shell;
-use crate::proto::{ExecResultPayload, Message, McpResultPayload};
+use crate::proto::{Message, McpResultPayload};
 
 pub async fn start(
     relay_url: String,
