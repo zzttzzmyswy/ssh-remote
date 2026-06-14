@@ -177,7 +177,9 @@ async fn handle_agent(
                         let broadcast = state_clone.agent_broadcast.read().await;
                         if let Some(channel_map) = broadcast.get(&session_id_clone) {
                             for tx in &channel_map.senders {
-                                let _ = tx.send(text_str.clone());
+                                if !tx.same_channel(&agent_tx) {
+                                    let _ = tx.send(text_str.clone());
+                                }
                             }
                         }
                     }
@@ -187,7 +189,7 @@ async fn handle_agent(
                             .and_then(|v| v.as_str())
                         {
                             let mut pending = state_clone.pending_mcp.write().await;
-                            if let Some(tx) = pending.remove(request_id) {
+                            if let Some((_sid, tx)) = pending.remove(request_id) {
                                 let result_text = serde_json::to_string(&json!({
                                     "stdout": proto_msg.payload.get("stdout").and_then(|v| v.as_str()).unwrap_or(""),
                                     "stderr": proto_msg.payload.get("stderr").and_then(|v| v.as_str()).unwrap_or(""),
@@ -204,7 +206,7 @@ async fn handle_agent(
                             .and_then(|v| v.as_str())
                         {
                             let mut pending = state_clone.pending_mcp.write().await;
-                            if let Some(tx) = pending.remove(request_id) {
+                            if let Some((_sid, tx)) = pending.remove(request_id) {
                                 let result_text = serde_json::to_string(&json!({
                                     "success": proto_msg.payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
                                     "error": proto_msg.payload.get("error").and_then(|v| v.as_str()).unwrap_or(""),
@@ -227,6 +229,11 @@ async fn handle_agent(
                 break;
             }
         }
+    }
+
+    {
+        let mut pending = state_clone.pending_mcp.write().await;
+        pending.retain(|_rid, (sid, _tx)| sid != &session_id);
     }
 
     sender_task.abort();

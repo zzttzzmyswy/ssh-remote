@@ -28,7 +28,7 @@ impl ChannelMap {
 pub struct SharedState {
     pub sessions: SessionRegistry,
     pub agent_broadcast: RwLock<HashMap<String, ChannelMap>>,
-    pub pending_mcp: RwLock<HashMap<String, oneshot::Sender<String>>>,
+    pub pending_mcp: RwLock<HashMap<String, (String, oneshot::Sender<String>)>>,
 }
 
 impl SharedState {
@@ -60,8 +60,8 @@ pub async fn start(
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
-        // .route("/mcp/sse", get(mcp::sse_handler))
-        // .route("/mcp/messages", axum::routing::post(mcp::messages_handler))
+        .route("/mcp/sse", get(mcp::sse_handler))
+        .route("/mcp/messages", axum::routing::post(mcp::messages_handler))
         .layer(cors)
         .with_state(state);
 
