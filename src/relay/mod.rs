@@ -7,6 +7,7 @@ pub mod ws;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 #[allow(dead_code)]
@@ -29,6 +30,7 @@ pub struct SharedState {
     pub sessions: SessionRegistry,
     pub agent_broadcast: RwLock<HashMap<String, ChannelMap>>,
     pub pending_mcp: RwLock<HashMap<String, (String, oneshot::Sender<String>)>>,
+    pub last_activity: RwLock<HashMap<String, Instant>>,
 }
 
 impl SharedState {
@@ -37,6 +39,7 @@ impl SharedState {
             sessions: SessionRegistry::new(),
             agent_broadcast: RwLock::new(HashMap::new()),
             pending_mcp: RwLock::new(HashMap::new()),
+            last_activity: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -97,10 +100,42 @@ pub async fn start(
         .route("/session.js", get(static_handler))
         .fallback(get(static_handler))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("Relay server listening on {}", bind);
+
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+                let now = Instant::now();
+                let mut to_remove = Vec::new();
+                {
+                    let activity = state_clone.last_activity.read().await;
+                    for (session_id, last) in activity.iter() {
+                        if now.duration_since(*last) > tokio::time::Duration::from_secs(1800) {
+                            to_remove.push(session_id.clone());
+                        }
+                    }
+                }
+                for session_id in to_remove {
+                    if !state_clone.sessions.is_temporary(&session_id).await {
+                        continue;
+                    }
+                    tracing::info!("Idle timeout: removing session {}", session_id);
+                    {
+                        let mut pending = state_clone.pending_mcp.write().await;
+                        pending.retain(|_rid, (sid, _tx)| sid != &session_id);
+                    }
+                    state_clone.sessions.remove(&session_id).await;
+                    state_clone.agent_broadcast.write().await.remove(&session_id);
+                    state_clone.last_activity.write().await.remove(&session_id);
+                }
+            }
+        });
+    }
 
     axum::serve(listener, app).await?;
 

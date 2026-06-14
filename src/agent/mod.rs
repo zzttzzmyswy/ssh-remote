@@ -15,7 +15,7 @@ pub async fn start(
     root: String,
     token_type: String,
 ) -> anyhow::Result<()> {
-    let mut client = RelayClient::connect(&relay_url, key.clone(), &token_type).await?;
+    let mut client = RelayClient::connect_with_retry(&relay_url, key.clone(), &token_type, 10).await?;
 
     println!("session_id: {}", client.session_id);
     for (token, perm) in &client.tokens {

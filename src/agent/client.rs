@@ -85,6 +85,37 @@ impl RelayClient {
         Ok(client)
     }
 
+    pub async fn connect_with_retry(
+        relay_url: &str,
+        fixed_key: Option<String>,
+        token_type: &str,
+        max_retries: u32,
+    ) -> anyhow::Result<Self> {
+        let mut delay = tokio::time::Duration::from_secs(1);
+        let max_delay = tokio::time::Duration::from_secs(30);
+
+        for attempt in 0..=max_retries {
+            match Self::connect(relay_url, fixed_key.clone(), token_type).await {
+                Ok(client) => return Ok(client),
+                Err(e) => {
+                    if attempt == max_retries {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        "Connection attempt {} failed: {}. Retrying in {:?}...",
+                        attempt + 1,
+                        e,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = std::cmp::min(delay * 2, max_delay);
+                }
+            }
+        }
+
+        anyhow::bail!("Failed to connect after {} retries", max_retries)
+    }
+
     pub async fn send(&mut self, msg: &ProtoMessage) -> anyhow::Result<()> {
         let text = serde_json::to_string(msg).context("Failed to serialize message")?;
         self.ws

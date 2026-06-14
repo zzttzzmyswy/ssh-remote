@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -167,6 +168,8 @@ async fn handle_agent(
         match msg_result {
             Ok(axum::extract::ws::Message::Text(text)) => {
                 let text_str = text.to_string();
+
+                state_clone.last_activity.write().await.insert(session_id_clone.clone(), Instant::now());
 
                 if let Ok(proto_msg) = serde_json::from_str::<ProtoMessage>(&text_str) {
                     if proto_msg.msg_type == "session:users"
@@ -370,6 +373,9 @@ async fn handle_browser(
         match msg_result {
             Ok(axum::extract::ws::Message::Text(text)) => {
                 let text_str = text.to_string();
+
+                state_clone.last_activity.write().await.insert(session_id_clone.clone(), Instant::now());
+
                 match serde_json::from_str::<ProtoMessage>(&text_str) {
                     Ok(proto_msg) => {
                         let msg_type = &proto_msg.msg_type;
