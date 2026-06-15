@@ -139,7 +139,7 @@ Multiple users with the same token join the same session and share real-time ter
 Relay exposes MCP protocol endpoints:
 
 - SSE: `http://<relay-ip>:3000/mcp/sse?token=<token>`
-- Messages: `http://<relay-ip>:3000/mcp/messages?token=<token>`
+- Messages: `http://<relay-ip>:3000/mcp/messages` (token via `Authorization: Bearer <token>` header, query parameter `?token=` as fallback)
 
 ### MCP Tools
 
@@ -169,7 +169,7 @@ All tools prefixed with `remote_` to avoid conflicts with the AI agent's own too
 ## File Manager
 
 - Breadcrumb path navigation with clickable segments
-- Upload via HTTP POST (`/upload?token=&path=`), streaming body (no file size limit)
+- Upload via HTTP POST (`/upload?path=...` + `Authorization: Bearer <token>` header), streaming body (no file size limit)
 - Download via WebSocket with `_mcp_request_id` routing
 - Delete, rename, mkdir, refresh
 - Drag-to-resize side panel

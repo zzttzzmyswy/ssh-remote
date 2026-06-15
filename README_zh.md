@@ -117,7 +117,7 @@ session: a1b2c3d4
 Relay 同时暴露 MCP 协议端点：
 
 - SSE：`http://<relay-ip>:3000/mcp/sse?token=<token>`
-- 消息：`http://<relay-ip>:3000/mcp/messages?token=<token>`
+- 消息：`http://<relay-ip>:3000/mcp/messages`（Token 通过 `Authorization: Bearer <token>` 请求头传递，query 参数 `?token=` 作为降级兼容）
 
 ### MCP 工具列表
 
@@ -147,7 +147,7 @@ Relay 同时暴露 MCP 协议端点：
 ## 文件管理器
 
 - 面包屑路径导航，每级可点击跳转
-- 上传通过 HTTP POST（`/upload?token=&path=`），流式传输，无大小限制
+- 上传通过 HTTP POST（`/upload?path=...` + `Authorization: Bearer <token>` 请求头），流式传输，无大小限制
 - 下载通过 WebSocket，`_mcp_request_id` 路由分发
 - 删除、重命名、新建文件夹、刷新
 - 侧栏宽度可拖拽调整
