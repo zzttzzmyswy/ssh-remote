@@ -1,5 +1,7 @@
 # ssh-remote
 
+English | [简体中文](README_zh.md)
+
 Self-hosted, lightweight remote server collaboration tool. Deploy a single Rust binary to share terminal sessions via browser, manage remote files, and expose MCP protocol endpoints for AI agents.
 
 ## Features
