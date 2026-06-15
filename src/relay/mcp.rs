@@ -78,6 +78,7 @@ pub async fn sse_handler(
 
 pub async fn messages_handler(
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -229,9 +230,16 @@ pub async fn messages_handler(
 
             let auth = {
                 let mut result = None;
-                if let Some(ref t) = url_token {
-                    if !t.is_empty() {
-                        result = state.sessions.authenticate(t).await;
+
+                if let Some(t) = crate::relay::auth::extract_bearer_token(&headers) {
+                    result = state.sessions.authenticate(&t).await;
+                }
+
+                if result.is_none() {
+                    if let Some(ref t) = url_token {
+                        if !t.is_empty() {
+                            result = state.sessions.authenticate(t).await;
+                        }
                     }
                 }
                 if result.is_none() {

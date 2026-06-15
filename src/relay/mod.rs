@@ -188,13 +188,15 @@ mod tests {
 
 pub async fn upload_handler(
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     body: axum::body::Body,
 ) -> Result<axum::http::StatusCode, axum::http::StatusCode> {
-    let token = params.get("token").ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = crate::relay::auth::extract_token_from_headers_or_query(&headers, params.get("token"))
+        .ok_or(StatusCode::UNAUTHORIZED)?;
     let path = params.get("path").ok_or(StatusCode::BAD_REQUEST)?;
 
-    let (session_id, permission) = state.sessions.authenticate(token)
+    let (session_id, permission) = state.sessions.authenticate(&token)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
 

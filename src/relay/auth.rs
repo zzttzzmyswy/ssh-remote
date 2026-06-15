@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-/// Extracts the `token` parameter value from a URL query string.
+use axum::http::HeaderMap;
+
 pub fn extract_token_from_query(query: &str) -> Option<String> {
     if query.is_empty() {
         return None;
@@ -15,6 +16,16 @@ pub fn extract_token_from_query(query: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("authorization")?.to_str().ok()?;
+    let value = value.strip_prefix("Bearer ")?;
+    if value.is_empty() { None } else { Some(value.to_string()) }
+}
+
+pub fn extract_token_from_headers_or_query(headers: &HeaderMap, query_token: Option<&String>) -> Option<String> {
+    extract_bearer_token(headers).or_else(|| query_token.cloned())
 }
 
 fn url_decode(s: &str) -> String {

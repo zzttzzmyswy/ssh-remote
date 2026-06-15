@@ -180,7 +180,8 @@ class FileManager {
             this._renderUploaders();
             console.error('Upload network error');
         };
-        xhr.open('POST', '/upload?token=' + encodeURIComponent(token) + '&path=' + encodeURIComponent(fullPath));
+        xhr.open('POST', '/upload?path=' + encodeURIComponent(fullPath) + '&token=' + encodeURIComponent(token));
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
         xhr.send(file);
     }
 
