@@ -5,7 +5,7 @@ pub mod mcp;
 pub mod session;
 pub mod ws;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -34,6 +34,38 @@ pub struct SharedState {
     pub last_activity: RwLock<HashMap<String, Instant>>,
     pub server_auth: String,
     pub bin_dir: Option<String>,
+    pub agent_event_buffers: RwLock<HashMap<String, EventBuffer>>,
+}
+
+const MAX_EVENT_BUFFER: usize = 1000;
+
+#[derive(Clone)]
+pub struct EventBuffer {
+    next_id: u64,
+    events: VecDeque<(u64, String)>,
+}
+
+impl EventBuffer {
+    pub fn new() -> Self {
+        Self { next_id: 0, events: VecDeque::new() }
+    }
+
+    pub fn push(&mut self, msg: String) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.events.push_back((id, msg));
+        if self.events.len() > MAX_EVENT_BUFFER {
+            self.events.pop_front();
+        }
+        id
+    }
+
+    pub fn replay_from(&self, last_id: u64) -> Vec<(u64, String)> {
+        self.events.iter()
+            .filter(|(id, _)| *id > last_id)
+            .cloned()
+            .collect()
+    }
 }
 
 impl SharedState {
@@ -45,7 +77,15 @@ impl SharedState {
             last_activity: RwLock::new(HashMap::new()),
             server_auth,
             bin_dir,
+            agent_event_buffers: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub async fn buffer_agent_event(&self, session_id: &str, msg: &str) -> u64 {
+        self.agent_event_buffers.write().await
+            .entry(session_id.to_string())
+            .or_insert_with(EventBuffer::new)
+            .push(msg.to_string())
     }
 }
 
@@ -222,6 +262,54 @@ mod tests {
         let body = Body::from("test content");
         let result = upload_handler(State(state), headers, Query(params), body).await;
         assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
+
+    // ── EventBuffer tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_event_buffer_push_and_replay() {
+        let mut buf = EventBuffer::new();
+        let id1 = buf.push("msg1".into());
+        let id2 = buf.push("msg2".into());
+        let id3 = buf.push("msg3".into());
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+
+        let replay = buf.replay_from(1);
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].0, 2);
+        assert_eq!(replay[1].0, 3);
+    }
+
+    #[test]
+    fn test_event_buffer_replay_from_zero() {
+        let mut buf = EventBuffer::new();
+        buf.push("a".into());
+        buf.push("b".into());
+        let replay = buf.replay_from(0);
+        assert_eq!(replay.len(), 2);
+    }
+
+    #[test]
+    fn test_event_buffer_replay_none_found() {
+        let mut buf = EventBuffer::new();
+        buf.push("x".into());
+        let replay = buf.replay_from(5);
+        assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn test_event_buffer_max_capacity() {
+        let mut buf = EventBuffer::new();
+        for i in 0..1200 {
+            buf.push(format!("msg{}", i));
+        }
+        // Should still only hold 1000
+        let replay = buf.replay_from(0);
+        assert_eq!(replay.len(), 1000);
+        // Oldest should have been evicted
+        assert_eq!(replay[0].0, 201);
     }
 }
 

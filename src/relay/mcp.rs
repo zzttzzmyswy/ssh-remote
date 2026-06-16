@@ -51,7 +51,7 @@ pub async fn sse_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.4"
+                                        "version": "0.1.5"
                 },
                 "capabilities": {
                     "tools": {}
@@ -95,7 +95,7 @@ pub async fn messages_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.4"
+                                        "version": "0.1.5"
                 },
                 "capabilities": {
                     "tools": {}
@@ -616,6 +616,7 @@ mod tests {
             last_activity: RwLock::new(HashMap::new()),
             server_auth: String::new(),
             bin_dir: None,
+            agent_event_buffers: RwLock::new(HashMap::new()),
         })
     }
 

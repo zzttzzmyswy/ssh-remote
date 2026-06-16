@@ -192,6 +192,7 @@ pub async fn agent_send_handler(
 
 pub async fn agent_events_handler(
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let session_id = match params.get("session") {
@@ -199,13 +200,17 @@ pub async fn agent_events_handler(
         _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
     };
 
-    // Verify session exists
     {
         let broadcast = state.agent_broadcast.read().await;
         if !broadcast.contains_key(&session_id) {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
     }
+
+    let last_event_id: Option<u64> = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
 
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
@@ -216,9 +221,33 @@ pub async fn agent_events_handler(
         }
     }
 
-    let stream = UnboundedReceiverStream::new(rx).map(|msg| {
-        Ok::<_, Infallible>(axum::response::sse::Event::default().data(msg))
-    });
+    let state_clone = state.clone();
+    let sid_clone = session_id.clone();
+
+    let stream = async_stream::stream! {
+        if let Some(last_id) = last_event_id {
+            let buffers = state_clone.agent_event_buffers.read().await;
+            if let Some(buf) = buffers.get(&sid_clone) {
+                for (id, msg) in buf.replay_from(last_id) {
+                    yield Ok::<_, Infallible>(
+                        axum::response::sse::Event::default()
+                            .id(id.to_string())
+                            .data(msg)
+                    );
+                }
+            }
+        }
+
+        let mut rx_stream = UnboundedReceiverStream::new(rx);
+        while let Some(msg) = tokio_stream::StreamExt::next(&mut rx_stream).await {
+            let id = state_clone.buffer_agent_event(&sid_clone, &msg).await;
+            yield Ok::<_, Infallible>(
+                axum::response::sse::Event::default()
+                    .id(id.to_string())
+                    .data(msg)
+            );
+        }
+    };
 
     Sse::new(stream).into_response()
 }
@@ -498,6 +527,7 @@ mod tests {
             last_activity: RwLock::new(HashMap::new()),
             server_auth: server_auth.to_string(),
             bin_dir: None,
+            agent_event_buffers: RwLock::new(HashMap::new()),
         })
     }
 
@@ -617,7 +647,8 @@ mod tests {
     async fn test_agent_events_missing_session_returns_400() {
         let state = make_state("");
         let params = HashMap::new();
-        let resp = agent_events_handler(State(state), Query(params)).await.into_response();
+        let headers = axum::http::HeaderMap::new();
+        let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
         assert_eq!(resp.status(), 400);
     }
 
@@ -626,7 +657,8 @@ mod tests {
         let state = make_state("");
         let mut params = HashMap::new();
         params.insert("session".to_string(), "nonexistent".to_string());
-        let resp = agent_events_handler(State(state), Query(params)).await.into_response();
+        let headers = axum::http::HeaderMap::new();
+        let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
         assert_eq!(resp.status(), 404);
     }
 
@@ -636,7 +668,8 @@ mod tests {
         state.agent_broadcast.write().await.insert("sid1".to_string(), ChannelMap::new());
         let mut params = HashMap::new();
         params.insert("session".to_string(), "sid1".to_string());
-        let resp = agent_events_handler(State(state), Query(params)).await.into_response();
+        let headers = axum::http::HeaderMap::new();
+        let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
         assert_eq!(resp.status(), 200);
     }
 }

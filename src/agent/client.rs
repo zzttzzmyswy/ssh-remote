@@ -14,6 +14,7 @@ enum Transport {
         client: reqwest::Client,
         send_url: String,
         events_rx: mpsc::UnboundedReceiver<String>,
+        last_event_id: Option<u64>,
         _task: tokio::task::JoinHandle<()>,
     },
 }
@@ -144,6 +145,7 @@ impl RelayClient {
                 client: http_client,
                 send_url,
                 events_rx: rx,
+                last_event_id: None,
                 _task: sse_task,
             },
             session_id: String::new(),
