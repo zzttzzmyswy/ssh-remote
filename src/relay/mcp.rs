@@ -18,8 +18,6 @@ pub async fn sse_handler(
     State(state): State<Arc<SharedState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let token = params.get("token").cloned();
-
     if !state.server_auth.is_empty() {
         let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
         if !crate::relay::auth::constant_time_eq(mcp_auth, &state.server_auth) {
@@ -34,30 +32,12 @@ pub async fn sse_handler(
         }
     }
 
-    if let Some(ref t) = token {
-        if !t.is_empty() && state.sessions.authenticate(t).await.is_none() {
-            return Sse::new(
-                futures_util::stream::once(std::future::ready(Ok::<_, Infallible>(
-                    Event::default()
-                        .event("error")
-                        .data(r#"{"code":"AUTH_INVALID_TOKEN","message":"Invalid token"}"#),
-                ))),
-            )
-            .into_response();
-        }
-    }
-
     let stream = async_stream::stream! {
         let endpoint_url = {
             let mut base = "/agent/mcp/messages".to_string();
-            let mut sep = "?";
-            if let Some(ref t) = token {
-                base.push_str(&format!("?token={}", t));
-                sep = "&";
-            }
             if !state.server_auth.is_empty() {
                 if let Some(auth) = params.get("auth") {
-                    base.push_str(&format!("{}auth={}", sep, auth));
+                    base.push_str(&format!("?auth={}", auth));
                 }
             }
             base
@@ -74,7 +54,7 @@ pub async fn sse_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.11"
+                                        "version": "0.1.12"
                 },
                 "capabilities": {
                     "tools": {}
@@ -149,7 +129,7 @@ pub async fn messages_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.11"
+                                        "version": "0.1.12"
                 },
                 "capabilities": {
                     "tools": {}
@@ -775,22 +755,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sse_handler_invalid_token_returns_error_sse() {
+    async fn test_sse_handler_no_token_returns_200() {
         let state = make_state();
-        let (_session_id, _tokens) = state.sessions.register(None, "rw").await;
+        // Token is no longer required in SSE URL — just auth
         let response = sse_handler(
             State(state),
-            Query(HashMap::from([(
-                "token".to_string(),
-                "wrong_token".to_string(),
-            )])),
+            Query(HashMap::new()),
         )
         .await
         .into_response();
-        assert_ne!(
-            response.status(),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
