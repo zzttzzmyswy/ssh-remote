@@ -16,11 +16,17 @@ use crate::relay::SharedState;
 
 pub async fn sse_handler(
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     if !state.server_auth.is_empty() {
-        let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
-        if !crate::relay::auth::constant_time_eq(mcp_auth, &state.server_auth) {
+        let header_auth = headers
+            .get("x-auth")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let query_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
+        let auth = if header_auth.is_empty() { query_auth } else { header_auth };
+        if !crate::relay::auth::constant_time_eq(auth, &state.server_auth) {
             return Sse::new(
                 futures_util::stream::once(std::future::ready(Ok::<_, Infallible>(
                     Event::default()
@@ -33,15 +39,7 @@ pub async fn sse_handler(
     }
 
     let stream = async_stream::stream! {
-        let endpoint_url = {
-            let mut base = "/agent/mcp/messages".to_string();
-            if !state.server_auth.is_empty() {
-                if let Some(auth) = params.get("auth") {
-                    base.push_str(&format!("?auth={}", auth));
-                }
-            }
-            base
-        };
+        let endpoint_url = "/agent/mcp/messages".to_string();
 
         yield Ok::<_, Infallible>(Event::default()
             .event("endpoint")
@@ -54,7 +52,7 @@ pub async fn sse_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.12"
+                                        "version": "0.1.13"
                 },
                 "capabilities": {
                     "tools": {}
@@ -105,9 +103,16 @@ pub async fn messages_handler(
 
     // Server auth check
     if !state.server_auth.is_empty() {
-        let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
+        let header_auth = headers
+            .get("x-auth")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let query_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
         let body_auth = body.get("auth").and_then(|v| v.as_str()).unwrap_or("");
-        if !crate::relay::auth::constant_time_eq(mcp_auth, &state.server_auth) && !crate::relay::auth::constant_time_eq(body_auth, &state.server_auth) {
+        let auth = if !header_auth.is_empty() { header_auth }
+            else if !query_auth.is_empty() { query_auth }
+            else { body_auth };
+        if !crate::relay::auth::constant_time_eq(auth, &state.server_auth) {
             return Json(json!({
                 "jsonrpc": "2.0",
                 "id": body.get("id").cloned().unwrap_or(Value::Null),
@@ -129,7 +134,7 @@ pub async fn messages_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.12"
+                                        "version": "0.1.13"
                 },
                 "capabilities": {
                     "tools": {}
@@ -747,6 +752,7 @@ mod tests {
         let state = make_state();
         let response = sse_handler(
             State(state),
+            axum::http::HeaderMap::new(),
             Query(HashMap::from([("token".to_string(), "".to_string())])),
         )
         .await
@@ -760,6 +766,7 @@ mod tests {
         // Token is no longer required in SSE URL — just auth
         let response = sse_handler(
             State(state),
+            axum::http::HeaderMap::new(),
             Query(HashMap::new()),
         )
         .await
