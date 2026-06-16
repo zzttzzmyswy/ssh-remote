@@ -273,7 +273,7 @@ async fn process_mcp_request(
                 }
             }
 
-            let timeout_ms_val = timeout_ms.unwrap_or(300_000).min(600_000);
+            let timeout_ms_val = timeout_ms.unwrap_or(300_000).min(1_800_000);
             let timeout_dur = std::time::Duration::from_millis(timeout_ms_val);
             match tokio::time::timeout(timeout_dur, rx).await {
                 Ok(Ok(result)) => {
