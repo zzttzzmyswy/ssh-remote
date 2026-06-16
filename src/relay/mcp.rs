@@ -52,6 +52,11 @@ pub async fn sse_handler(
             .event("endpoint")
             .data(format!("/agent/mcp/messages?sessionId={}", sid_for_stream)));
 
+        // Send a connected event to confirm the SSE stream is alive
+        yield Ok::<_, Infallible>(Event::default()
+            .event("connected")
+            .data("{}"));
+
         let mut rx_stream = UnboundedReceiverStream::new(rx);
         while let Some(msg) = tokio_stream::StreamExt::next(&mut rx_stream).await {
             yield Ok::<_, Infallible>(Event::default().event("message").data(msg));
@@ -61,12 +66,12 @@ pub async fn sse_handler(
     let state_clone = state.clone();
     let sid = mcp_session_id.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         state_clone.mcp_sse_channels.write().await.remove(&sid);
     });
 
     let mut response = Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
         .into_response();
     response.headers_mut().insert(
         axum::http::header::HeaderName::from_static("x-accel-buffering"),
