@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
-use crate::proto::{Message as ProtoMessage, Permission, TokenType};
+use crate::proto::{Message as ProtoMessage, Permission, TokenType, requires_write};
 
 use crate::relay::ChannelMap;
 use crate::relay::SharedState;
@@ -411,6 +411,59 @@ pub async fn browser_sse_handler(
         axum::http::header::HeaderValue::from_static("no"),
     );
     response
+}
+
+// ── Browser send handler (POST) ─────────────────────────────────────
+
+pub async fn browser_send_handler(
+    State(state): State<Arc<SharedState>>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let session_id = match body["session_id"].as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Missing session_id"}))).into_response(),
+    };
+
+    let token = match body["token"].as_str() {
+        Some(t) => t,
+        None => return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "Missing token"}))).into_response(),
+    };
+
+    let (auth_session_id, permission) = match state.sessions.authenticate(token).await {
+        Some(r) => r,
+        None => return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "Invalid token"}))).into_response(),
+    };
+
+    if auth_session_id != session_id {
+        return (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({"error": "Token does not belong to this session"}))).into_response();
+    }
+
+    let msg_type = body["type"].as_str().unwrap_or("");
+    if msg_type.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Missing message type"}))).into_response();
+    }
+
+    if requires_write(msg_type) && permission == Permission::ReadOnly {
+        return (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({"error": "Read-only users cannot send write-type messages"}))).into_response();
+    }
+
+    {
+        let mut activity = state.last_activity.write().await;
+        activity.insert(session_id.clone(), Instant::now());
+    }
+
+    let text_str = serde_json::to_string(&body).unwrap_or_default();
+
+    {
+        let broadcast = state.agent_broadcast.read().await;
+        if let Some(cm) = broadcast.get(&session_id) {
+            if let Some(ref agent_tx) = cm.agent {
+                let _ = agent_tx.send(text_str);
+            }
+        }
+    }
+
+    axum::http::StatusCode::ACCEPTED.into_response()
 }
 
 
