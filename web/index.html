@@ -31,7 +31,7 @@
 
         <h3>快速开始</h3>
         <p>在目标机器上下载并运行 <code>shell-remote</code> 代理模式，它会连接到你的 relay 服务器。</p>
-        <pre>$ ./shell-remote-{arch} agent --relay-url https://your-relay.example.com</pre>
+        <pre>$ ./shell-remote-{arch} agent --relay-url <span class="relay-host">https://your-host</span></pre>
 
         <h3>参数说明</h3>
         <ul>
@@ -44,15 +44,15 @@
 
         <h3>使用固定密钥</h3>
         <p>固定密钥在 relay 重启后仍然有效，适合长期部署：</p>
-        <pre>$ ./shell-remote-agent agent --relay-url https://relay.example.com --key my-secret-key</pre>
+        <pre>$ ./shell-remote-agent agent --relay-url <span class="relay-host">https://your-host</span> --key my-secret-key</pre>
 
         <h3>只读模式</h3>
         <p>只读 token 只能查看终端输出和文件列表，不能执行命令或修改文件：</p>
-        <pre>$ ./shell-remote-agent agent --relay-url https://relay.example.com --token-type ro</pre>
+        <pre>$ ./shell-remote-agent agent --relay-url <span class="relay-host">https://your-host</span> --token-type ro</pre>
 
         <h3>双模式 (rw + ro)</h3>
         <p>同时生成读写和只读两个密钥：</p>
-        <pre>$ ./shell-remote-agent agent --relay-url https://relay.example.com --token-type both</pre>
+        <pre>$ ./shell-remote-agent agent --relay-url <span class="relay-host">https://your-host</span> --token-type both</pre>
 
         <p style="margin-top:1rem;color:var(--text-muted);font-size:0.78rem;">
             启动后 relay 会打印会话密钥，将密钥分发给浏览器用户即可远程协作。
@@ -107,38 +107,22 @@
             tokenInput.value = urlToken;
         }
 
+        // ── Relay host substitution ────────────────────────────────────
+        const relayHost = location.protocol + '//' + location.host;
+        document.querySelectorAll('.relay-host').forEach(el => {
+            el.textContent = relayHost;
+        });
+
         // ── Download cards ────────────────────────────────────────────
         const ARCHS = [
-            {
-                id: 'x86_64',
-                name: 'x86_64',
-                desc: 'Intel / AMD 64 位系统 — 桌面电脑、服务器、云虚拟机',
-                tags: 'Desktop · Server · VM'
-            },
-            {
-                id: 'aarch64',
-                name: 'AArch64',
-                desc: 'ARM 64 位 — 树莓派 4/5、AWS Graviton、Apple Silicon 虚拟机',
-                tags: 'Raspberry Pi 4/5 · Cloud ARM'
-            },
-            {
-                id: 'armv7',
-                name: 'ARMv7',
-                desc: 'ARM 32 位 — 树莓派 2/3、嵌入式设备',
-                tags: 'Raspberry Pi 2/3 · Embedded'
-            }
+            { id: 'x86_64', name: 'x86_64', desc: 'Intel / AMD 64 位 — 桌面、服务器、云虚拟机', tags: 'Desktop · Server · VM' },
+            { id: 'aarch64', name: 'AArch64', desc: 'ARM 64 位 — 树莓派 4/5、AWS Graviton、Apple Silicon 虚拟机', tags: 'Raspberry Pi 4/5 · Cloud ARM' },
+            { id: 'armv7', name: 'ARMv7', desc: 'ARM 32 位 — 树莓派 2/3、嵌入式设备', tags: 'Raspberry Pi 2/3 · Embedded' }
         ];
 
         (async () => {
             const cards = document.getElementById('download-cards');
             const host = location.origin;
-            let version = '0.1.8';
-            let hasLocal = false;
-
-            try {
-                const r = await fetch('/bin/x86_64', { method: 'HEAD' });
-                hasLocal = r.ok;
-            } catch (_) {}
 
             const ua = navigator.userAgent || '';
             let currentArch = '';
@@ -146,24 +130,25 @@
             else if (ua.includes('aarch64') || ua.includes('arm64') || ua.includes('armv8')) currentArch = 'aarch64';
             else if (ua.includes('armv7') || ua.includes('armv7l')) currentArch = 'armv7';
 
-            // Update version in guide examples
             document.querySelectorAll('.guide-section pre').forEach(el => {
                 el.textContent = el.textContent.replace('{arch}', currentArch || 'x86_64');
             });
+
+            let hasLocal = false;
+            try {
+                const r = await fetch('/bin/x86_64', { method: 'HEAD' });
+                hasLocal = r.ok;
+            } catch (_) {}
 
             for (const a of ARCHS) {
                 const isCurrent = a.id === currentArch;
                 const c = document.createElement('div');
                 c.className = 'download-card' + (isCurrent ? ' current' : '');
 
-                let downloadUrl, curlCmd;
-                if (hasLocal) {
-                    downloadUrl = `/bin/${a.id}`;
-                    curlCmd = `curl -fLO ${host}/bin/${a.id} && chmod +x shell-remote-${a.id}`;
-                } else {
-                    downloadUrl = `https://github.com/zzttzzmyswy/shell-remote/releases/latest/download/shell-remote-${a.id}`;
-                    curlCmd = `curl -fLO https://github.com/zzttzzmyswy/shell-remote/releases/latest/download/shell-remote-${a.id} && chmod +x shell-remote-${a.id}`;
-                }
+                const downloadUrl = hasLocal ? `/bin/${a.id}` : `https://github.com/zzttzzmyswy/shell-remote/releases/latest/download/shell-remote-${a.id}`;
+                const curlCmd = hasLocal
+                    ? `curl -fLO ${host}/bin/${a.id} && chmod +x shell-remote-${a.id}`
+                    : `curl -fLO https://github.com/zzttzzmyswy/shell-remote/releases/latest/download/shell-remote-${a.id} && chmod +x shell-remote-${a.id}`;
 
                 c.innerHTML = `<h3>${a.name}</h3>
                     <div class="tags">${a.tags}</div>
