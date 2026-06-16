@@ -219,36 +219,6 @@ async fn process_mcp_request(
                         "description": "List all active exec sessions on the REMOTE TARGET MACHINE with their status.",
                         "inputSchema": {"type": "object", "properties": {}}
                     },
-                    {
-                        "name": "file_remote_read",
-                        "description": "Read the content of a file from the REMOTE TARGET MACHINE.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"path": {"type": "string", "description": "Absolute path to the file on the remote machine"}},
-                            "required": ["path"]
-                        }
-                    },
-                    {
-                        "name": "file_remote_write",
-                        "description": "Write content to a file on the REMOTE TARGET MACHINE.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the file on the remote machine"},
-                                "content": {"type": "string", "description": "Content to write to the file"}
-                            },
-                            "required": ["path", "content"]
-                        }
-                    },
-                    {
-                        "name": "file_remote_list",
-                        "description": "List contents of a directory on the REMOTE TARGET MACHINE.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"path": {"type": "string", "description": "Absolute path to the directory on the remote machine"}},
-                            "required": ["path"]
-                        }
-                    }
                 ]
             }
         }),
@@ -283,8 +253,7 @@ async fn process_mcp_request(
 
             let write_tools = [
                 "exec_remote", "exec_remote_start", "exec_remote_input",
-                "exec_remote_close", "file_remote_write", "file_remote_rename",
-                "file_remote_delete",
+                "exec_remote_close",
             ];
             if write_tools.contains(&tool_name) && permission == Permission::ReadOnly {
                 return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call write-type tools"}});
@@ -370,19 +339,6 @@ async fn process_mcp_request(
                         let timeout_ms = arguments.get("timeout_ms").and_then(|v| v.as_u64());
                         let p = if let Some(t) = timeout_ms { json!({"cmd":cmd,"timeout_ms":t}) } else { json!({"cmd":cmd}) };
                         ("mcp:exec", p)
-                    }
-                    "file_remote_read" => {
-                        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                        ("fs:read", json!({"path":path}))
-                    }
-                    "file_remote_write" => {
-                        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                        let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                        ("fs:write", json!({"path":path,"content":content}))
-                    }
-                    "file_remote_list" => {
-                        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                        ("fs:list", json!({"path":path}))
                     }
                     _ => return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}}),
                 };
@@ -511,7 +467,7 @@ mod tests {
     async fn test_messages_handler_tools_list() {
         let state = make_state();
         let r = mcp_send_and_recv(&state, HashMap::new(), json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -525,7 +481,7 @@ mod tests {
     async fn test_messages_handler_invalid_token_returns_error() {
         let state = make_state();
         let r = mcp_send_and_recv(&state, HashMap::from([("token".into(),"bad".into())]),
-            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"file_remote_read","arguments":{"path":"/etc/hostname"}}})).await;
+            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"exec_remote","arguments":{"cmd":"echo hello"}}})).await;
         assert_eq!(r["error"]["code"], -32001);
     }
 
@@ -539,11 +495,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_messages_handler_file_remote_read_without_agent() {
+    async fn test_messages_handler_exec_remote_without_agent2() {
         let state = make_state();
         let (_sid, tokens) = state.sessions.register(None, "rw").await;
         let r = mcp_send_and_recv(&state, HashMap::from([("token".into(), tokens[0].0.clone())]),
-            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"file_remote_read","arguments":{"path":"/etc/hostname"}}})).await;
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"exec_remote","arguments":{"cmd":"echo hello"}}})).await;
         assert!(r["result"]["isError"].as_bool().unwrap_or(false));
     }
 }
