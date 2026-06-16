@@ -167,6 +167,7 @@ async fn process_mcp_request(
         }),
 
 
+
         "tools/list" => json!({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -174,223 +175,101 @@ async fn process_mcp_request(
                 "tools": [
                     {
                         "name": "exec_remote",
-                        "description": "Execute a shell command on the REMOTE TARGET MACHINE (NOT the AI's local sandbox). Returns stdout, stderr, and exit code.",
+                        "description": "Execute a shell command on the remote target machine. Returns stdout, stderr, and exit code.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
+                                "token": {"type": "string", "description": "Session token for authentication"},
                                 "cmd": {"type": "string", "description": "The shell command to execute on the remote machine"},
-                                "timeout_ms": {"type": "number", "description": "Optional timeout in milliseconds"}
+                                "timeout_ms": {"type": "number", "description": "Optional timeout in milliseconds (default 30s)"}
                             },
-                            "required": ["cmd"]
+                            "required": ["token", "cmd"]
                         }
-                    },
-                    {
-                        "name": "exec_remote_start",
-                        "description": "Start an interactive command session ON THE REMOTE TARGET MACHINE. Returns exec_id and initial output.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"cmd": {"type": "string", "description": "Shell command to execute"}},
-                            "required": ["cmd"]
-                        }
-                    },
-                    {
-                        "name": "exec_remote_input",
-                        "description": "Send input to a running exec session ON THE REMOTE TARGET MACHINE and get accumulated output.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "exec_id": {"type": "string", "description": "ID of the exec session"},
-                                "data": {"type": "string", "description": "Text to write to stdin"}
-                            },
-                            "required": ["exec_id", "data"]
-                        }
-                    },
-                    {
-                        "name": "exec_remote_close",
-                        "description": "Close an exec session ON THE REMOTE TARGET MACHINE. Kills the process if still running.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"exec_id": {"type": "string", "description": "ID of the exec session to close"}},
-                            "required": ["exec_id"]
-                        }
-                    },
-                    {
-                        "name": "exec_remote_list",
-                        "description": "List all active exec sessions on the REMOTE TARGET MACHINE with their status.",
-                        "inputSchema": {"type": "object", "properties": {}}
-                    },
+                    }
                 ]
             }
         }),
 
         "tools/call" => {
+            let tool_name = body.get("params").and_then(|p| p.get("name").and_then(|n| n.as_str())).unwrap_or("");
+            if tool_name != "exec_remote" {
+                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}});
+            }
+
             let empty_obj = json!({});
             let arguments = body.get("params").and_then(|p| p.get("arguments")).unwrap_or(&empty_obj);
-            let tool_name = body.get("params").and_then(|p| p.get("name").and_then(|n| n.as_str())).unwrap_or("");
 
-            let auth = {
-                let mut result = None;
-                if let Some(t) = crate::relay::auth::extract_bearer_token(&headers) {
-                    result = state.sessions.authenticate(&t).await;
-                }
-                if result.is_none() {
-                    if let Some(ref t) = url_token {
-                        if !t.is_empty() { result = state.sessions.authenticate(t).await; }
-                    }
-                }
-                if result.is_none() {
-                    if let Some(t) = arguments.get("token").and_then(|v| v.as_str()) {
-                        if !t.is_empty() { result = state.sessions.authenticate(t).await; }
-                    }
-                }
-                result
-            };
+            // Token from tool arguments (primary), fallback to query param
+            let token = arguments.get("token").and_then(|v| v.as_str())
+                .or_else(|| url_token.as_deref())
+                .unwrap_or("");
 
-            let (session_id, permission) = match auth {
+            let (session_id, permission) = match state.sessions.authenticate(token).await {
                 Some(r) => r,
                 None => return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32001,"message":"Invalid token"}}),
             };
 
-            let write_tools = [
-                "exec_remote", "exec_remote_start", "exec_remote_input",
-                "exec_remote_close",
-            ];
-            if write_tools.contains(&tool_name) && permission == Permission::ReadOnly {
-                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call write-type tools"}});
+            if permission == Permission::ReadOnly {
+                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call exec_remote"}});
             }
 
-            if matches!(tool_name, "exec_remote_start" | "exec_remote_input" | "exec_remote_close" | "exec_remote_list") {
-                let request_id = Uuid::new_v4().to_string();
-                let proto_message: crate::proto::Message;
-                let exec_timeout: u64;
+            let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+            let timeout_ms = arguments.get("timeout_ms").and_then(|v| v.as_u64());
 
-                match tool_name {
-                    "exec_remote_start" => {
-                        let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-                        proto_message = crate::proto::Message { msg_type: "mcp:exec_start".to_string(), session_id: session_id.clone(), payload: json!({"cmd":cmd,"_mcp_request_id":request_id}) };
-                        exec_timeout = 10000;
-                    }
-                    "exec_remote_input" => {
-                        let exec_id = arguments.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
-                        let data = arguments.get("data").and_then(|v| v.as_str()).unwrap_or("");
-                        let data_b64 = crate::agent::fs::encode_b64(data.as_bytes());
-                        proto_message = crate::proto::Message { msg_type: "mcp:exec_input".to_string(), session_id: session_id.clone(), payload: json!({"exec_id":exec_id,"data_b64":data_b64,"_mcp_request_id":request_id}) };
-                        exec_timeout = 10000;
-                    }
-                    "exec_remote_close" => {
-                        let exec_id = arguments.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
-                        proto_message = crate::proto::Message { msg_type: "mcp:exec_close".to_string(), session_id: session_id.clone(), payload: json!({"exec_id":exec_id,"_mcp_request_id":request_id}) };
-                        exec_timeout = 5000;
-                    }
-                    "exec_remote_list" => {
-                        proto_message = crate::proto::Message { msg_type: "mcp:exec_list".to_string(), session_id: session_id.clone(), payload: json!({"_mcp_request_id":request_id}) };
-                        exec_timeout = 5000;
-                    }
-                    _ => unreachable!(),
-                }
-
-                let (tx, rx) = oneshot::channel();
-                { state.pending_mcp.write().await.insert(request_id.clone(), (session_id.clone(), tx)); }
-                {
-                    let agent_tx_option = { state.agent_broadcast.read().await.get(&session_id).and_then(|cm| cm.agent.clone()) };
-                    match agent_tx_option {
-                        Some(agent_tx) => {
-                            let text = serde_json::to_string(&proto_message).unwrap_or_default();
-                            let _ = agent_tx.send(text);
-                        }
-                        None => {
-                            state.pending_mcp.write().await.remove(&request_id);
-                            return json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: No agent connected for this session"}],"isError":true}});
-                        }
-                    }
-                }
-
-                match tokio::time::timeout(tokio::time::Duration::from_millis(exec_timeout), rx).await {
-                    Ok(Ok(result)) => {
-                        let value: Value = serde_json::from_str(&result).unwrap_or_default();
-                        let stdout = value.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-                        let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-                        let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        let exit_code = value.get("exit_code").and_then(|v| v.as_i64());
-                        let mut text = format!("Status: {}\n", status);
-                        if let Some(code) = exit_code { text.push_str(&format!("Exit code: {}\n", code)); }
-                        if !stdout.is_empty() {
-                            if let Some(decoded) = crate::agent::fs::decode_b64(stdout) {
-                                if let Ok(s) = String::from_utf8(decoded) { text.push_str(&s); }
-                            }
-                        }
-                        if !stderr.is_empty() {
-                            if let Some(decoded) = crate::agent::fs::decode_b64(stderr) {
-                                if let Ok(s) = String::from_utf8(decoded) { text.push_str(&format!("\n[stderr]\n{}", s)); }
-                            }
-                        }
-                        let exec_id_val = value.get("exec_id").and_then(|v| v.as_str()).unwrap_or("");
-                        json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":text.trim()}],"exec_id":exec_id_val}})
-                    }
-                    _ => {
-                        state.pending_mcp.write().await.remove(&request_id);
-                        json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: Request timed out or agent disconnected"}],"isError":true}})
-                    }
-                }
+            let mcp_req_id = Uuid::new_v4().to_string();
+            let payload = if let Some(t) = timeout_ms {
+                json!({"cmd":cmd,"timeout_ms":t,"_mcp_request_id":mcp_req_id})
             } else {
-                let (msg_type, payload) = match tool_name {
-                    "exec_remote" => {
-                        let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-                        let timeout_ms = arguments.get("timeout_ms").and_then(|v| v.as_u64());
-                        let p = if let Some(t) = timeout_ms { json!({"cmd":cmd,"timeout_ms":t}) } else { json!({"cmd":cmd}) };
-                        ("mcp:exec", p)
+                json!({"cmd":cmd,"_mcp_request_id":mcp_req_id})
+            };
+
+            let proto_msg = ProtoMessage {
+                msg_type: "mcp:exec".to_string(),
+                session_id: session_id.clone(),
+                payload,
+            };
+
+            let (tx, rx) = oneshot::channel();
+            { state.pending_mcp.write().await.insert(mcp_req_id.clone(), (session_id.clone(), tx)); }
+
+            {
+                let agent_tx_option = { state.agent_broadcast.read().await.get(&session_id).and_then(|cm| cm.agent.clone()) };
+                match agent_tx_option {
+                    Some(agent_tx) => {
+                        let _ = agent_tx.send(serde_json::to_string(&proto_msg).unwrap_or_default());
                     }
-                    _ => return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}}),
-                };
-
-                let (response_tx, mut response_rx) = oneshot::channel::<String>();
-                let mcp_request_id = Uuid::new_v4().to_string();
-                { state.pending_mcp.write().await.insert(mcp_request_id.clone(), (session_id.clone(), response_tx)); }
-
-                let _mcp_request_msg = json!({"_mcp_request_id":&mcp_request_id});
-                let mut full_payload = payload.clone();
-                if let Some(obj) = full_payload.as_object_mut() { obj.insert("_mcp_request_id".to_string(), json!(mcp_request_id)); }
-                let proto_msg = ProtoMessage { msg_type: msg_type.to_string(), session_id: session_id.clone(), payload: full_payload };
-
-                {
-                    let agent_tx_option = { state.agent_broadcast.read().await.get(&session_id).and_then(|cm| cm.agent.clone()) };
-                    match agent_tx_option {
-                        Some(agent_tx) => {
-                            let text = serde_json::to_string(&proto_msg).unwrap_or_default();
-                            let _ = agent_tx.send(text);
-                        }
-                        None => {
-                            state.pending_mcp.write().await.remove(&mcp_request_id);
-                            return json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: No agent connected for this session"}],"isError":true}});
-                        }
+                    None => {
+                        state.pending_mcp.write().await.remove(&mcp_req_id);
+                        return json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: No agent connected for this session"}],"isError":true}});
                     }
                 }
+            }
 
-                match tokio::time::timeout(tokio::time::Duration::from_secs(60), &mut response_rx).await {
-                    Ok(result) => {
-                        let text = result.unwrap_or_default();
-                        let value: Value = serde_json::from_str(&text).unwrap_or_default();
-                        let stdout = value.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-                        let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-                        let exit_code = value.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let mut text = String::new();
-                        if !stdout.is_empty() {
-                            if let Some(decoded) = crate::agent::fs::decode_b64(stdout) {
-                                if let Ok(s) = String::from_utf8(decoded) { text.push_str(&s); }
-                            }
+            let timeout_ms_val = timeout_ms.unwrap_or(30000).min(300_000);
+            let timeout_dur = std::time::Duration::from_millis(timeout_ms_val);
+            match tokio::time::timeout(timeout_dur, rx).await {
+                Ok(Ok(result)) => {
+                    let value: Value = serde_json::from_str(&result).unwrap_or_default();
+                    let stdout = value.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+                    let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                    let exit_code = value.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let mut text = String::new();
+                    if !stdout.is_empty() {
+                        if let Some(decoded) = crate::agent::fs::decode_b64(stdout) {
+                            if let Ok(s) = String::from_utf8(decoded) { text.push_str(&s); }
                         }
-                        if !stderr.is_empty() {
-                            if let Some(decoded) = crate::agent::fs::decode_b64(stderr) {
-                                if let Ok(s) = String::from_utf8(decoded) { text.push_str(&format!("\n[stderr]\n{}", s)); }
-                            }
+                    }
+                    if !stderr.is_empty() {
+                        if let Some(decoded) = crate::agent::fs::decode_b64(stderr) {
+                            if let Ok(s) = String::from_utf8(decoded) { text.push_str(&format!("\n[stderr]\n{}", s)); }
                         }
-                        if text.is_empty() { text = format!("Exit code: {}", exit_code); }
-                        json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":text.trim()}]}})
                     }
-                    _ => {
-                        state.pending_mcp.write().await.remove(&mcp_request_id);
-                        json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: Request timed out waiting for agent response"}],"isError":true}})
-                    }
+                    if text.is_empty() { text = format!("Exit code: {}", exit_code); }
+                    json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":text.trim()}]}})
+                }
+                _ => {
+                    state.pending_mcp.write().await.remove(&mcp_req_id);
+                    json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: Request timed out or agent disconnected"}],"isError":true}})
                 }
             }
         },
@@ -467,7 +346,7 @@ mod tests {
     async fn test_messages_handler_tools_list() {
         let state = make_state();
         let r = mcp_send_and_recv(&state, HashMap::new(), json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -480,8 +359,8 @@ mod tests {
     #[tokio::test]
     async fn test_messages_handler_invalid_token_returns_error() {
         let state = make_state();
-        let r = mcp_send_and_recv(&state, HashMap::from([("token".into(),"bad".into())]),
-            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"exec_remote","arguments":{"cmd":"echo hello"}}})).await;
+        let r = mcp_send_and_recv(&state, HashMap::new(),
+            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"exec_remote","arguments":{"token":"bad","cmd":"echo hello"}}})).await;
         assert_eq!(r["error"]["code"], -32001);
     }
 
@@ -489,17 +368,8 @@ mod tests {
     async fn test_messages_handler_exec_remote_without_agent() {
         let state = make_state();
         let (_sid, tokens) = state.sessions.register(None, "rw").await;
-        let r = mcp_send_and_recv(&state, HashMap::from([("token".into(), tokens[0].0.clone())]),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"exec_remote","arguments":{"cmd":"echo hello"}}})).await;
-        assert!(r["result"]["isError"].as_bool().unwrap_or(false));
-    }
-
-    #[tokio::test]
-    async fn test_messages_handler_exec_remote_without_agent2() {
-        let state = make_state();
-        let (_sid, tokens) = state.sessions.register(None, "rw").await;
-        let r = mcp_send_and_recv(&state, HashMap::from([("token".into(), tokens[0].0.clone())]),
-            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"exec_remote","arguments":{"cmd":"echo hello"}}})).await;
+        let r = mcp_send_and_recv(&state, HashMap::new(),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"exec_remote","arguments":{"token":tokens[0].0,"cmd":"echo hello"}}})).await;
         assert!(r["result"]["isError"].as_bool().unwrap_or(false));
     }
 }
