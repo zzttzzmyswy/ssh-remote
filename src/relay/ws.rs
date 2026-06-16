@@ -488,7 +488,7 @@ mod tests {
             agent_event_buffers: RwLock::new(HashMap::new()),
             rate_limiter: RwLock::new(RateLimiter::new()),
             max_upload_size: 100 * 1024 * 1024,
-            mcp_sse_channels: RwLock::new(HashMap::new()),
+            sse_sessions: RwLock::new(HashMap::new()),
         })
     }
 
@@ -501,10 +501,12 @@ mod tests {
     }
 
     async fn add_browser(state: &Arc<SharedState>, session_id: &str, user_id: &str) -> mpsc::UnboundedReceiver<String> {
+        let sse_sid = format!("bs_test_{}", Uuid::new_v4());
         let (tx, rx) = mpsc::unbounded_channel::<String>();
+        state.sse_sessions.write().await.insert(sse_sid.clone(), tx);
         let mut broadcast = state.agent_broadcast.write().await;
         if let Some(cm) = broadcast.get_mut(session_id) {
-            cm.browsers.insert(user_id.to_string(), tx);
+            cm.browser_sessions.insert(user_id.to_string(), sse_sid);
         }
         rx
     }
@@ -634,5 +636,34 @@ mod tests {
         let headers = axum::http::HeaderMap::new();
         let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
         assert_eq!(resp.status(), 200);
+    }
+
+    // ── browser_send_handler tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_browser_send_missing_session_id() {
+        let state = make_state("");
+        let body = json!({"token": "some_token", "type": "terminal:input", "payload": {}});
+        let resp = browser_send_handler(State(state), Json(body)).await.into_response();
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn test_browser_send_missing_token() {
+        let state = make_state("");
+        let body = json!({"session_id": "sid1", "type": "terminal:input", "payload": {}});
+        let resp = browser_send_handler(State(state), Json(body)).await.into_response();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_browser_send_readonly_write_forbidden() {
+        let state = make_state("");
+        let (sid, tokens) = state.sessions.register(None, "ro").await;
+        let token = &tokens[0].0;
+        state.agent_broadcast.write().await.insert(sid.clone(), ChannelMap::new());
+        let body = json!({"session_id": sid, "token": token, "type": "terminal:input", "payload": {}});
+        let resp = browser_send_handler(State(state), Json(body)).await.into_response();
+        assert_eq!(resp.status(), 403);
     }
 }

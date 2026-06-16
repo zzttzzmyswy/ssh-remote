@@ -209,7 +209,6 @@ mod tests {
             "index.html",
             "session.html",
             "style.css",
-            "ws.js",
             "term.js",
             "files.js",
             "session.js",
