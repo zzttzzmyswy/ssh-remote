@@ -99,9 +99,15 @@ impl RelayClient {
             .await
             .context("Failed to POST register message")?;
 
-        let response: serde_json::Value = resp.json()
-            .await
-            .context("Failed to parse register response")?;
+        let status = resp.status();
+        let body_text = resp.text().await.context("Failed to read register response")?;
+
+        if !status.is_success() {
+            anyhow::bail!("Registration failed (HTTP {}): {}", status, body_text);
+        }
+
+        let response: serde_json::Value = serde_json::from_str(&body_text)
+            .with_context(|| format!("Failed to parse register response (status {}): {}", status, &body_text[..body_text.len().min(500)]))?;
 
         let session_id = response["session_id"].as_str()
             .context("Missing session_id in register response")?.to_string();

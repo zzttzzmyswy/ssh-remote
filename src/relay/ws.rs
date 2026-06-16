@@ -158,25 +158,7 @@ pub async fn agent_send_handler(
 ) -> impl IntoResponse {
     let msg_type = body["type"].as_str().unwrap_or("");
 
-    if !state.server_auth.is_empty() {
-        let auth_header = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        let body_auth = body["auth"].as_str().unwrap_or("");
-        let query_auth = headers
-            .get("x-auth")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !crate::relay::auth::constant_time_eq(auth_header, &state.server_auth)
-            && !crate::relay::auth::constant_time_eq(body_auth, &state.server_auth)
-            && !crate::relay::auth::constant_time_eq(query_auth, &state.server_auth)
-        {
-            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid server password").into_response();
-        }
-    }
-
+    // agent:register is allowed without server auth (agents use keys for identity)
     if msg_type == "agent:register" {
         let fixed_key = body["key"].as_str().map(|s| s.to_string());
         let token_type_str = body["token_type"].as_str().unwrap_or("rw");
@@ -198,7 +180,6 @@ pub async fn agent_send_handler(
             println!("  {} -> {}", perm_str, token);
         }
 
-        // Create channel map entry so browser messages can be queued
         {
             let mut broadcast = state.agent_broadcast.write().await;
             broadcast.entry(session_id.clone()).or_insert_with(ChannelMap::new);
@@ -209,6 +190,21 @@ pub async fn agent_send_handler(
             "session_id": session_id,
             "payload": { "tokens": tokens_json }
         })).into_response();
+    }
+
+    // All other message types require server auth
+    if !state.server_auth.is_empty() {
+        let auth_header = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let body_auth = body["auth"].as_str().unwrap_or("");
+        if !crate::relay::auth::constant_time_eq(auth_header, &state.server_auth)
+            && !crate::relay::auth::constant_time_eq(body_auth, &state.server_auth)
+        {
+            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid server password").into_response();
+        }
     }
 
     let session_id = body["session_id"].as_str().unwrap_or("").to_string();
