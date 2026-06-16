@@ -409,8 +409,9 @@ async fn run_session(
 
                             "mcp:exec" => {
                                 let cmd = msg.payload["cmd"].as_str().unwrap_or("");
+                                let timeout_ms = msg.payload["timeout_ms"].as_u64().unwrap_or(300_000);
                                 let mcp_request_id = msg.payload["_mcp_request_id"].as_str().map(|s| s.to_string());
-                                let (stdout, stderr, exit_code) = execute_command(cmd).await;
+                                let (stdout, stderr, exit_code) = execute_command(cmd, timeout_ms).await;
                                 let result = McpResultPayload { stdout, stderr, exit_code };
                                 let mut payload = serde_json::to_value(&result).unwrap();
                                 if let (Some(req_id), serde_json::Value::Object(ref mut map)) =
@@ -520,9 +521,10 @@ async fn run_session(
     Ok(())
 }
 
-async fn execute_command(cmd: &str) -> (String, String, i32) {
+async fn execute_command(cmd: &str, timeout_ms: u64) -> (String, String, i32) {
     let cmd = cmd.to_string();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&cmd)
@@ -543,6 +545,6 @@ async fn execute_command(cmd: &str) -> (String, String, i32) {
             (stdout, stderr, exit_code)
         }
         Ok(Err(e)) => (String::new(), format!("Failed to execute command: {}", e), -1),
-        Err(_) => (String::new(), "Command timed out after 30s".to_string(), -1),
+        Err(_) => (String::new(), format!("Command timed out after {}s", timeout_ms / 1000), -1),
     }
 }
