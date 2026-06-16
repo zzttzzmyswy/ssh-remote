@@ -20,8 +20,22 @@ use crate::relay::SharedState;
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+
+    {
+        let mut rl = state.rate_limiter.write().await;
+        if !rl.check(&client_ip, 10, std::time::Duration::from_secs(60)) {
+            return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
+
     ws.max_message_size(256 * 1024 * 1024)
         .max_frame_size(64 * 1024 * 1024)
         .on_upgrade(move |socket| handle_socket(socket, state, params))
@@ -517,6 +531,7 @@ async fn handle_browser_ws(
 mod tests {
     use super::*;
     use crate::relay::session::SessionRegistry;
+    use crate::relay::RateLimiter;
     use tokio::sync::{oneshot, RwLock};
 
     fn make_state(server_auth: &str) -> Arc<SharedState> {
@@ -528,6 +543,7 @@ mod tests {
             server_auth: server_auth.to_string(),
             bin_dir: None,
             agent_event_buffers: RwLock::new(HashMap::new()),
+            rate_limiter: RwLock::new(RateLimiter::new()),
         })
     }
 

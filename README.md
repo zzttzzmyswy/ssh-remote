@@ -97,7 +97,7 @@ Options:
 |------|---------|-------------|
 | `--bind` | `0.0.0.0:3000` | Listen address |
 | `--dev` | false | Development mode (plaintext WebSocket) |
-| `--auth` | `password` | Server access password for the web UI |
+| `--auth` | `password` | Server access password (required for browser, MCP, upload). Use a strong password in production. |
 | `--bin-dir` | — | Path to directory with pre-built binaries (for /download page) |
 | `--tls-cert` | — | TLS certificate path |
 | `--tls-key` | — | TLS private key path |
@@ -158,8 +158,9 @@ All client-facing endpoints are under `/agent`:
 
 Relay exposes MCP protocol endpoints:
 
-- SSE: `http://<relay-ip>:3000/agent/mcp/sse?token=<token>`
-- Messages: `http://<relay-ip>:3000/agent/mcp/messages` (token via `Authorization: Bearer <token>` header, query parameter `?token=` as fallback)
+- SSE: `http://<relay-ip>:3000/agent/mcp/sse?token=<token>&auth=<password>`
+- Messages: `http://<relay-ip>:3000/agent/mcp/messages` (token via `Authorization: Bearer <token>` header, auth via query param `?auth=` or JSON body `"auth"` field)
+- Both endpoints require `--auth` password when configured on the relay
 
 ### MCP Tools
 

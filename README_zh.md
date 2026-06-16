@@ -83,7 +83,7 @@ docker run -d --name shell-remote-relay -p 3000:3000 shell-remote relay --dev --
 |------|--------|------|
 | `--bind` | `0.0.0.0:3000` | 监听地址 |
 | `--dev` | false | 开发模式（明文 WebSocket） |
-| `--auth` | `password` | 服务器访问密码 |
+| `--auth` | `password` | 服务器访问密码（对浏览器、MCP、上传均生效）。生产环境请使用强密码。 |
 | `--bin-dir` | — | 预编译二进制文件目录（供 /download 页面使用） |
 | `--tls-cert` | — | TLS 证书路径 |
 | `--tls-key` | — | TLS 私钥路径 |

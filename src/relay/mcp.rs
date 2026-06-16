@@ -20,6 +20,20 @@ pub async fn sse_handler(
 ) -> impl IntoResponse {
     let token = params.get("token").cloned();
 
+    if !state.server_auth.is_empty() {
+        let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
+        if mcp_auth != state.server_auth {
+            return Sse::new(
+                futures_util::stream::once(std::future::ready(Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(r#"{"code":"AUTH_INVALID_PASSWORD","message":"Invalid server password"}"#),
+                ))),
+            )
+            .into_response();
+        }
+    }
+
     if let Some(ref t) = token {
         if !t.is_empty() && state.sessions.authenticate(t).await.is_none() {
             return Sse::new(
@@ -34,10 +48,19 @@ pub async fn sse_handler(
     }
 
     let stream = async_stream::stream! {
-        let endpoint_url = if let Some(ref t) = token {
-            format!("/agent/mcp/messages?token={}", t)
-        } else {
-            "/agent/mcp/messages".to_string()
+        let endpoint_url = {
+            let mut base = format!("/agent/mcp/messages");
+            let mut sep = "?";
+            if let Some(ref t) = token {
+                base.push_str(&format!("?token={}", t));
+                sep = "&";
+            }
+            if !state.server_auth.is_empty() {
+                if let Some(auth) = params.get("auth") {
+                    base.push_str(&format!("{}auth={}", sep, auth));
+                }
+            }
+            base
         };
 
         yield Ok::<_, Infallible>(Event::default()
@@ -51,7 +74,7 @@ pub async fn sse_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.5"
+                                        "version": "0.1.6"
                 },
                 "capabilities": {
                     "tools": {}
@@ -82,6 +105,32 @@ pub async fn messages_handler(
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    // Rate limit
+    {
+        let client_ip = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
+        let mut rl = state.rate_limiter.write().await;
+        if !rl.check(&client_ip, 60, std::time::Duration::from_secs(60)) {
+            return (axum::http::StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response();
+        }
+    }
+
+    // Server auth check
+    if !state.server_auth.is_empty() {
+        let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
+        let body_auth = body.get("auth").and_then(|v| v.as_str()).unwrap_or("");
+        if mcp_auth != state.server_auth && body_auth != state.server_auth {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "id": body.get("id").cloned().unwrap_or(Value::Null),
+                "error": {"code": -32001, "message": "Invalid server password"}
+            })).into_response();
+        }
+    }
+
     let url_token = params.get("token").cloned();
 
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -95,7 +144,7 @@ pub async fn messages_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.5"
+                                        "version": "0.1.6"
                 },
                 "capabilities": {
                     "tools": {}
@@ -605,6 +654,7 @@ pub async fn messages_handler(
 mod tests {
     use super::*;
     use crate::relay::session::SessionRegistry;
+    use crate::relay::RateLimiter;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -617,6 +667,7 @@ mod tests {
             server_auth: String::new(),
             bin_dir: None,
             agent_event_buffers: RwLock::new(HashMap::new()),
+            rate_limiter: RwLock::new(RateLimiter::new()),
         })
     }
 

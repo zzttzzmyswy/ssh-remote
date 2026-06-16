@@ -7,7 +7,7 @@ pub mod ws;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 #[allow(dead_code)]
@@ -35,6 +35,30 @@ pub struct SharedState {
     pub server_auth: String,
     pub bin_dir: Option<String>,
     pub agent_event_buffers: RwLock<HashMap<String, EventBuffer>>,
+    pub rate_limiter: RwLock<RateLimiter>,
+}
+
+pub struct RateLimiter {
+    attempts: HashMap<String, Vec<Instant>>,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self { attempts: HashMap::new() }
+    }
+
+    /// Returns true if the request should be allowed (not rate limited)
+    pub fn check(&mut self, key: &str, max_per_window: usize, window: Duration) -> bool {
+        let now = Instant::now();
+        let cutoff = now - window;
+        let entry = self.attempts.entry(key.to_string()).or_default();
+        entry.retain(|t| *t > cutoff);
+        if entry.len() >= max_per_window {
+            return false;
+        }
+        entry.push(now);
+        true
+    }
 }
 
 const MAX_EVENT_BUFFER: usize = 1000;
@@ -78,6 +102,7 @@ impl SharedState {
             server_auth,
             bin_dir,
             agent_event_buffers: RwLock::new(HashMap::new()),
+            rate_limiter: RwLock::new(RateLimiter::new()),
         }
     }
 
