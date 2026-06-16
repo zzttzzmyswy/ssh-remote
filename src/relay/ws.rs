@@ -26,14 +26,17 @@ pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, tex
         if broadcast_types.contains(&proto_msg.msg_type.as_str()) {
             let is_mcp_rpc = proto_msg.payload.get("_mcp_request_id").is_some();
             if !is_mcp_rpc {
+                let sse_sessions = state.sse_sessions.read().await;
                 let broadcast = state.agent_broadcast.read().await;
                 if let Some(channel_map) = broadcast.get(session_id) {
                     let target_user = proto_msg.payload
                         .get("_target_user_id")
                         .and_then(|v| v.as_str());
-                    for (uid, tx) in &channel_map.browsers {
+                    for (uid, sse_sid) in &channel_map.browser_sessions {
                         if target_user.is_none_or(|t| t == uid.as_str()) {
-                            let _ = tx.send(text_str.to_string());
+                            if let Some(tx) = sse_sessions.get(sse_sid) {
+                                let _ = tx.send(text_str.to_string());
+                            }
                         }
                     }
                 }

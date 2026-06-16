@@ -240,13 +240,14 @@ mod tests {
             .allow_headers(Any);
 
         let app: Router = Router::new()
-            .route("/ws", get(super::ws::ws_handler))
+            .route("/agent/session/sse", get(super::ws::browser_sse_handler))
+            .route("/agent/session/send", axum::routing::post(super::ws::browser_send_handler))
             .route("/mcp/sse", get(super::mcp::sse_handler))
             .route("/mcp/messages", axum::routing::post(super::mcp::messages_handler))
             .route("/", get(static_handler))
             .route("/session", get(static_handler))
             .route("/style.css", get(static_handler))
-            .route("/ws.js", get(static_handler))
+            .route("/sse.js", get(static_handler))
             .route("/term.js", get(static_handler))
             .route("/files.js", get(static_handler))
             .route("/session.js", get(static_handler))
@@ -493,7 +494,8 @@ pub async fn start(
         .allow_headers(Any);
 
     let app = Router::new()
-        .route("/agent", get(ws::ws_handler))
+        .route("/agent/session/sse", get(ws::browser_sse_handler))
+        .route("/agent/session/send", axum::routing::post(ws::browser_send_handler))
         .route("/agent/send", axum::routing::post(ws::agent_send_handler))
         .route("/agent/events", get(ws::agent_events_handler))
         .route("/agent/upload", axum::routing::post(upload_handler).layer(axum::extract::DefaultBodyLimit::disable()))
@@ -504,7 +506,7 @@ pub async fn start(
         .route("/", get(static_handler))
         .route("/session", get(static_handler))
         .route("/style.css", get(static_handler))
-        .route("/ws.js", get(static_handler))
+        .route("/sse.js", get(static_handler))
         .route("/term.js", get(static_handler))
         .route("/files.js", get(static_handler))
         .route("/session.js", get(static_handler))
