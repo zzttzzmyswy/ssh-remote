@@ -2,6 +2,18 @@
 
 use axum::http::HeaderMap;
 
+/// Constant-time string comparison for passwords/secrets
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub fn extract_token_from_query(query: &str) -> Option<String> {
     if query.is_empty() {
         return None;
@@ -29,7 +41,7 @@ pub fn extract_token_from_headers_or_query(headers: &HeaderMap, query_token: Opt
 }
 
 fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut result: Vec<u8> = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -37,19 +49,19 @@ fn url_decode(s: &str) -> String {
             if let (Some(hi), Some(lo)) =
                 (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
             {
-                result.push(((hi << 4) | lo) as char);
+                result.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
         }
         if bytes[i] == b'+' {
-            result.push(' ');
+            result.push(b' ');
         } else {
-            result.push(bytes[i] as char);
+            result.push(bytes[i]);
         }
         i += 1;
     }
-    result
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 fn hex_digit(b: u8) -> Option<u8> {

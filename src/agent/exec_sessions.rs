@@ -12,6 +12,8 @@ use uuid::Uuid;
 use crate::agent::fs;
 use crate::proto::{ExecResultPayload, ExecSessionInfo};
 
+const MAX_OUTPUT_BUF: usize = 1_000_000;
+
 #[derive(Debug, Clone, PartialEq)]
 enum ExecStatus {
     Running,
@@ -58,7 +60,14 @@ impl ExecSessionManager {
     pub async fn spawn(&self, cmd: &str) -> Result<ExecResultPayload, ExecResultPayload> {
         {
             let sessions = self.sessions.read().await;
-            if sessions.len() >= self.max_sessions {
+            let running_count = sessions.values().filter(|s| {
+                if let Ok(status) = s.status.try_read() {
+                    *status == ExecStatus::Running
+                } else {
+                    true // Can't read lock, treat as running for safety
+                }
+            }).count();
+            if running_count >= self.max_sessions {
                 return Err(ExecResultPayload {
                     exec_id: String::new(),
                     stdout: String::new(),
@@ -73,6 +82,9 @@ impl ExecSessionManager {
                 });
             }
         }
+
+        // Reap terminated sessions before spawning
+        self.reap_terminated().await;
 
         let exec_id = Uuid::new_v4().to_string();
         let cmd_str = cmd.to_string();
@@ -129,6 +141,10 @@ impl ExecSessionManager {
                                 let s = String::from_utf8_lossy(&stdout_buf[..n]).to_string();
                                 let mut buf = output_buf_clone.lock().await;
                                 buf.push_str(&s);
+                                if buf.len() > MAX_OUTPUT_BUF {
+                                    let keep_start = buf.len() - MAX_OUTPUT_BUF;
+                                    buf.drain(0..keep_start);
+                                }
                                 last_activity = Instant::now();
                             }
                             Err(_) => { done = true; }
@@ -141,6 +157,10 @@ impl ExecSessionManager {
                                 let s = String::from_utf8_lossy(&stderr_buf[..n]).to_string();
                                 let mut buf = output_buf_clone.lock().await;
                                 buf.push_str(&s);
+                                if buf.len() > MAX_OUTPUT_BUF {
+                                    let keep_start = buf.len() - MAX_OUTPUT_BUF;
+                                    buf.drain(0..keep_start);
+                                }
                                 last_activity = Instant::now();
                             }
                             Err(_) => { done = true; }
@@ -170,6 +190,9 @@ impl ExecSessionManager {
                     }
                 }
             }
+
+            // Ensure the child process is killed before waiting
+            let _ = child.start_kill();
 
             // Wait for process to fully exit
             match child.wait().await {
@@ -379,7 +402,7 @@ impl ExecSessionManager {
         let mut infos = Vec::new();
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         for (exec_id, session) in sessions.iter() {
@@ -414,7 +437,6 @@ impl ExecSessionManager {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn shutdown_all(&self) {
         let exec_ids: Vec<String> = {
             let sessions = self.sessions.read().await;
@@ -422,6 +444,21 @@ impl ExecSessionManager {
         };
         for exec_id in exec_ids {
             let _ = self.close(&exec_id).await;
+        }
+    }
+
+    pub async fn reap_terminated(&self) {
+        let mut sessions = self.sessions.write().await;
+        let mut to_remove = Vec::new();
+        for (id, s) in sessions.iter() {
+            if let Ok(status) = s.status.try_read() {
+                if *status != ExecStatus::Running {
+                    to_remove.push(id.clone());
+                }
+            }
+        }
+        for id in to_remove {
+            sessions.remove(&id);
         }
     }
 }

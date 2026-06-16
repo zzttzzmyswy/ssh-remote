@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use crate::proto::TokenType;
 
 mod agent;
 mod proto;
@@ -32,9 +33,9 @@ enum Command {
         #[arg(long, default_value_t = false)]
         dev: bool,
 
-        /// Server access password (default: password)
-        #[arg(long, default_value = "password")]
-        auth: String,
+        /// Server access password (required unless --dev)
+        #[arg(long)]
+        auth: Option<String>,
 
         /// Directory containing pre-built binaries for /download page
         #[arg(long)]
@@ -51,13 +52,13 @@ enum Command {
         #[arg(long)]
         key: Option<String>,
 
-        /// Root directory for file system sandbox (defaults to $HOME)
+        /// Default directory for file manager (defaults to $HOME)
         #[arg(long, env = "HOME")]
         root: String,
 
         /// Token type: rw, ro, or both
         #[arg(long, default_value = "rw")]
-        token_type: String,
+        token_type: TokenType,
 
         /// Shell path (e.g., /bin/bash, /usr/bin/zsh)
         #[arg(long, env = "SHELL", default_value = "/bin/bash")]
@@ -97,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
             token_type,
             shell,
         } => {
-            agent::start(relay_url, key, root, token_type, shell).await?;
+            agent::start(relay_url, key, root, token_type.as_str().to_string(), shell).await?;
         }
     }
 

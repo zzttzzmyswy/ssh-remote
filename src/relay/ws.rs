@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
-use crate::proto::{Message as ProtoMessage, Permission};
+use crate::proto::{Message as ProtoMessage, Permission, TokenType};
+
 use crate::relay::ChannelMap;
 use crate::relay::SharedState;
 
@@ -36,8 +37,8 @@ pub async fn ws_handler(
         }
     }
 
-    ws.max_message_size(256 * 1024 * 1024)
-        .max_frame_size(64 * 1024 * 1024)
+    ws.max_message_size(4 * 1024 * 1024)
+        .max_frame_size(1024 * 1024)
         .on_upgrade(move |socket| handle_socket(socket, state, params))
 }
 
@@ -86,21 +87,24 @@ async fn handle_socket(
 
 // ── Shared agent message routing ─────────────────────────────────────
 
-pub fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str: &str) {
+pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str: &str) {
     if let Ok(proto_msg) = serde_json::from_str::<ProtoMessage>(text_str) {
         let broadcast_types = [
             "session:users", "session:tab_list", "session:tab_switched",
             "terminal:output", "fs:result", "fs:mkdir", "mcp:result",
         ];
         if broadcast_types.contains(&proto_msg.msg_type.as_str()) {
-            let broadcast = state.agent_broadcast.blocking_read();
-            if let Some(channel_map) = broadcast.get(session_id) {
-                let target_user = proto_msg.payload
-                    .get("_target_user_id")
-                    .and_then(|v| v.as_str());
-                for (uid, tx) in &channel_map.browsers {
-                    if target_user.map_or(true, |t| t == uid.as_str()) {
-                        let _ = tx.send(text_str.to_string());
+            let is_mcp_rpc = proto_msg.payload.get("_mcp_request_id").is_some();
+            if !is_mcp_rpc {
+                let broadcast = state.agent_broadcast.read().await;
+                if let Some(channel_map) = broadcast.get(session_id) {
+                    let target_user = proto_msg.payload
+                        .get("_target_user_id")
+                        .and_then(|v| v.as_str());
+                    for (uid, tx) in &channel_map.browsers {
+                        if target_user.is_none_or(|t| t == uid.as_str()) {
+                            let _ = tx.send(text_str.to_string());
+                        }
                     }
                 }
             }
@@ -109,7 +113,7 @@ pub fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str:
         // MCP oneshot
         if proto_msg.msg_type == "mcp:result" || proto_msg.msg_type == "mcp:exec_result" {
             if let Some(request_id) = proto_msg.payload.get("_mcp_request_id").and_then(|v| v.as_str()) {
-                let mut pending = state.pending_mcp.blocking_write();
+                let mut pending = state.pending_mcp.write().await;
                 if let Some((_sid, tx)) = pending.remove(request_id) {
                     let result_text = if proto_msg.msg_type == "mcp:exec_result" {
                         serde_json::to_string(&proto_msg.payload).unwrap_or_default()
@@ -128,7 +132,7 @@ pub fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str:
         // FS oneshot
         if proto_msg.msg_type == "fs:result" {
             if let Some(request_id) = proto_msg.payload.get("_mcp_request_id").and_then(|v| v.as_str()) {
-                let mut pending = state.pending_mcp.blocking_write();
+                let mut pending = state.pending_mcp.write().await;
                 if let Some((_sid, tx)) = pending.remove(request_id) {
                     let result_text = serde_json::to_string(&json!({
                         "success": proto_msg.payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -149,14 +153,36 @@ pub fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str:
 
 pub async fn agent_send_handler(
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let msg_type = body["type"].as_str().unwrap_or("");
 
+    if !state.server_auth.is_empty() {
+        let auth_header = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let body_auth = body["auth"].as_str().unwrap_or("");
+        let query_auth = headers
+            .get("x-auth")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !crate::relay::auth::constant_time_eq(auth_header, &state.server_auth)
+            && !crate::relay::auth::constant_time_eq(body_auth, &state.server_auth)
+            && !crate::relay::auth::constant_time_eq(query_auth, &state.server_auth)
+        {
+            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid server password").into_response();
+        }
+    }
+
     if msg_type == "agent:register" {
         let fixed_key = body["key"].as_str().map(|s| s.to_string());
-        let token_type = body["token_type"].as_str().unwrap_or("rw");
-        let (session_id, tokens) = state.sessions.register(fixed_key.clone(), token_type).await;
+        let token_type_str = body["token_type"].as_str().unwrap_or("rw");
+        let token_type = crate::proto::TokenType::from_str_val(token_type_str)
+            .unwrap_or(crate::proto::TokenType::Rw);
+        let (session_id, tokens) = state.sessions.register(fixed_key.clone(), token_type.as_str()).await;
 
         let tokens_json: Vec<Value> = tokens.iter().map(|(token, perm)| {
             let perm_str = match perm { Permission::ReadWrite => "rw", Permission::ReadOnly => "ro" };
@@ -197,7 +223,7 @@ pub async fn agent_send_handler(
         activity.insert(session_id.clone(), Instant::now());
     }
 
-    route_agent_message(&state, &session_id, &text_str);
+    route_agent_message(&state, &session_id, &text_str).await;
 
     axum::http::StatusCode::OK.into_response()
 }
@@ -209,6 +235,31 @@ pub async fn agent_events_handler(
     headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    {
+        let mut rl = state.rate_limiter.write().await;
+        if !rl.check(&client_ip, 30, std::time::Duration::from_secs(60)) {
+            return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
+
+    if !state.server_auth.is_empty() {
+        let query_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
+        let header_auth = headers
+            .get("x-auth")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !crate::relay::auth::constant_time_eq(query_auth, &state.server_auth)
+            && !crate::relay::auth::constant_time_eq(header_auth, &state.server_auth)
+        {
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
     let session_id = match params.get("session") {
         Some(s) if !s.is_empty() => s.clone(),
         _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
@@ -275,9 +326,10 @@ async fn handle_agent_ws(
     register_msg: Value,
 ) {
     let fixed_key = register_msg["key"].as_str().map(|s| s.to_string());
-    let token_type = register_msg["token_type"].as_str().unwrap_or("rw");
+    let token_type_str = register_msg["token_type"].as_str().unwrap_or("rw");
+    let token_type = TokenType::from_str_val(token_type_str).unwrap_or(TokenType::Rw);
 
-    let (session_id, tokens) = state.sessions.register(fixed_key.clone(), token_type).await;
+    let (session_id, tokens) = state.sessions.register(fixed_key.clone(), token_type.as_str()).await;
 
     let tokens_json: Vec<Value> = tokens.iter().map(|(token, perm)| {
         let perm_str = match perm { Permission::ReadWrite => "rw", Permission::ReadOnly => "ro" };
@@ -328,7 +380,7 @@ async fn handle_agent_ws(
             Ok(axum::extract::ws::Message::Text(text)) => {
                 let text_str = text.to_string();
                 state_clone.last_activity.write().await.insert(session_id_clone.clone(), Instant::now());
-                route_agent_message(&state_clone, &session_id_clone, &text_str);
+                route_agent_message(&state_clone, &session_id_clone, &text_str).await;
             }
             Ok(axum::extract::ws::Message::Close(_)) => break,
             Ok(_) => {}
@@ -377,7 +429,7 @@ async fn handle_browser_ws(
     let token = join_msg["payload"]["token"].as_str().unwrap_or("");
     let server_password = join_msg["payload"]["server_auth"].as_str().unwrap_or("");
 
-    if !state.server_auth.is_empty() && server_password != state.server_auth {
+    if !state.server_auth.is_empty() && !crate::relay::auth::constant_time_eq(server_password, &state.server_auth) {
         let error_msg = serde_json::to_string(&json!({
             "type": "error", "session_id": "", "payload": {"code": "AUTH_INVALID_PASSWORD", "message": "Invalid server password"}
         })).unwrap_or_default();
@@ -544,20 +596,21 @@ mod tests {
             bin_dir: None,
             agent_event_buffers: RwLock::new(HashMap::new()),
             rate_limiter: RwLock::new(RateLimiter::new()),
+            max_upload_size: 100 * 1024 * 1024,
         })
     }
 
-    fn insert_channel_map(state: &Arc<SharedState>, session_id: &str) -> (mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>) {
+    async fn insert_channel_map(state: &Arc<SharedState>, session_id: &str) -> (mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>) {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
         let mut cm = ChannelMap::new();
         cm.agent = Some(tx.clone());
-        state.agent_broadcast.blocking_write().insert(session_id.to_string(), cm);
+        state.agent_broadcast.write().await.insert(session_id.to_string(), cm);
         (tx, rx)
     }
 
-    fn add_browser(state: &Arc<SharedState>, session_id: &str, user_id: &str) -> mpsc::UnboundedReceiver<String> {
+    async fn add_browser(state: &Arc<SharedState>, session_id: &str, user_id: &str) -> mpsc::UnboundedReceiver<String> {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
-        let mut broadcast = state.agent_broadcast.blocking_write();
+        let mut broadcast = state.agent_broadcast.write().await;
         if let Some(cm) = broadcast.get_mut(session_id) {
             cm.browsers.insert(user_id.to_string(), tx);
         }
@@ -566,77 +619,77 @@ mod tests {
 
     // ── route_agent_message tests ────────────────────────────────────
 
-    #[test]
-    fn test_route_agent_message_broadcasts_to_all_browsers() {
+    #[tokio::test]
+    async fn test_route_agent_message_broadcasts_to_all_browsers() {
         let state = make_state("");
-        insert_channel_map(&state, "sid1");
-        let mut rx1 = add_browser(&state, "sid1", "user1");
-        let mut rx2 = add_browser(&state, "sid1", "user2");
+        insert_channel_map(&state, "sid1").await;
+        let mut rx1 = add_browser(&state, "sid1", "user1").await;
+        let mut rx2 = add_browser(&state, "sid1", "user2").await;
 
         let msg = json!({"type":"terminal:output","session_id":"sid1","payload":{"data":"hello"}}).to_string();
-        route_agent_message(&state, "sid1", &msg);
+        route_agent_message(&state, "sid1", &msg).await;
 
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
     }
 
-    #[test]
-    fn test_route_agent_message_target_user_only() {
+    #[tokio::test]
+    async fn test_route_agent_message_target_user_only() {
         let state = make_state("");
-        insert_channel_map(&state, "sid1");
-        let mut rx1 = add_browser(&state, "sid1", "user1");
-        let mut rx2 = add_browser(&state, "sid1", "user2");
+        insert_channel_map(&state, "sid1").await;
+        let mut rx1 = add_browser(&state, "sid1", "user1").await;
+        let mut rx2 = add_browser(&state, "sid1", "user2").await;
 
         let msg = json!({"type":"terminal:output","session_id":"sid1","payload":{"data":"hello","_target_user_id":"user1"}}).to_string();
-        route_agent_message(&state, "sid1", &msg);
+        route_agent_message(&state, "sid1", &msg).await;
 
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_err());
     }
 
-    #[test]
-    fn test_route_agent_message_missing_session_no_panic() {
+    #[tokio::test]
+    async fn test_route_agent_message_missing_session_no_panic() {
         let state = make_state("");
         let msg = json!({"type":"terminal:output","session_id":"nonexistent","payload":{}}).to_string();
-        route_agent_message(&state, "nonexistent", &msg);
+        route_agent_message(&state, "nonexistent", &msg).await;
     }
 
-    #[test]
-    fn test_route_agent_message_mcp_result_oneshot() {
+    #[tokio::test]
+    async fn test_route_agent_message_mcp_result_oneshot() {
         let state = make_state("");
-        insert_channel_map(&state, "sid1");
+        insert_channel_map(&state, "sid1").await;
 
         let (tx, mut rx) = oneshot::channel::<String>();
-        state.pending_mcp.blocking_write().insert("req1".to_string(), ("sid1".to_string(), tx));
+        state.pending_mcp.write().await.insert("req1".to_string(), ("sid1".to_string(), tx));
 
         let msg = json!({"type":"mcp:result","session_id":"sid1","payload":{"stdout":"hello","stderr":"","exit_code":0,"_mcp_request_id":"req1"}}).to_string();
-        route_agent_message(&state, "sid1", &msg);
+        route_agent_message(&state, "sid1", &msg).await;
 
         let result = rx.try_recv().unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["stdout"].as_str().unwrap(), "hello");
     }
 
-    #[test]
-    fn test_route_agent_message_fs_result_oneshot() {
+    #[tokio::test]
+    async fn test_route_agent_message_fs_result_oneshot() {
         let state = make_state("");
-        insert_channel_map(&state, "sid1");
+        insert_channel_map(&state, "sid1").await;
 
         let (tx, mut rx) = oneshot::channel::<String>();
-        state.pending_mcp.blocking_write().insert("fs1".to_string(), ("sid1".to_string(), tx));
+        state.pending_mcp.write().await.insert("fs1".to_string(), ("sid1".to_string(), tx));
 
         let msg = json!({"type":"fs:result","session_id":"sid1","payload":{"success":true,"error":"","content":"ok","path":"/tmp/x","_mcp_request_id":"fs1"}}).to_string();
-        route_agent_message(&state, "sid1", &msg);
+        route_agent_message(&state, "sid1", &msg).await;
 
         let result = rx.try_recv().unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["success"].as_bool().unwrap(), true);
     }
 
-    #[test]
-    fn test_route_agent_message_invalid_json_no_panic() {
+    #[tokio::test]
+    async fn test_route_agent_message_invalid_json_no_panic() {
         let state = make_state("");
-        route_agent_message(&state, "sid1", "not valid json {{{");
+        route_agent_message(&state, "sid1", "not valid json {{{").await;
     }
 
     // ── agent_send_handler tests ─────────────────────────────────────
@@ -645,7 +698,8 @@ mod tests {
     async fn test_agent_send_register_creates_session() {
         let state = make_state("");
         let body = json!({"type":"agent:register","token_type":"rw"});
-        let resp = agent_send_handler(State(state), Json(body)).await.into_response();
+        let headers = axum::http::HeaderMap::new();
+        let resp = agent_send_handler(State(state), headers, Json(body)).await.into_response();
         assert_eq!(resp.status(), 200);
     }
 
@@ -653,7 +707,8 @@ mod tests {
     async fn test_agent_send_no_session_id_returns_400() {
         let state = make_state("");
         let body = json!({"type":"terminal:output","payload":{"data":"x"}});
-        let resp = agent_send_handler(State(state), Json(body)).await.into_response();
+        let headers = axum::http::HeaderMap::new();
+        let resp = agent_send_handler(State(state), headers, Json(body)).await.into_response();
         assert_eq!(resp.status(), 400);
     }
 

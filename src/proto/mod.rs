@@ -134,32 +134,58 @@ pub struct ErrorPayload {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
 pub enum Permission {
     ReadWrite,
     ReadOnly,
 }
 
-pub const WRITE_TYPES: &[&str] = &[
-    "terminal:input",
-    "terminal:resize",
-    "fs:write",
-    "fs:delete",
-    "fs:rename",
-    "mcp:exec",
-    "mcp:exec_start",
-    "mcp:exec_input",
-    "mcp:exec_close",
-    "mcp:exec_list",
-    "fs:mkdir",
-    "session:tab_create",
-    "session:tab_close",
-    "session:tab_switch",
-];
+#[derive(Debug, Clone, PartialEq, Eq, Hash, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum TokenType {
+    Rw,
+    Ro,
+    Both,
+}
+
+impl TokenType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            TokenType::Rw => "rw",
+            TokenType::Ro => "ro",
+            TokenType::Both => "both",
+        }
+    }
+
+    pub fn from_str_val(s: &str) -> Option<Self> {
+        match s {
+            "rw" => Some(TokenType::Rw),
+            "ro" => Some(TokenType::Ro),
+            "both" => Some(TokenType::Both),
+            _ => None,
+        }
+    }
+}
 
 pub fn requires_write(msg_type: &str) -> bool {
-    WRITE_TYPES.contains(&msg_type)
+    let read_only_types = [
+        "terminal:output",
+        "session:users",
+        "session:tab_list",
+        "fs:result",
+        "fs:list",
+        "fs:read",
+        "fs:mkdir",
+        "mcp:result",
+        "mcp:exec_result",
+        "mcp:exec_list",
+    ];
+    if read_only_types.contains(&msg_type) {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -238,9 +264,12 @@ mod tests {
         assert!(requires_write("fs:write"));
         assert!(requires_write("fs:delete"));
         assert!(!requires_write("terminal:output"));
-        assert!(!requires_write("session:join"));
+        assert!(requires_write("session:join")); // unknown type → fail-closed → requires write
         assert!(!requires_write("fs:list"));
         assert!(!requires_write("fs:read"));
+        assert!(!requires_write("session:users"));
+        assert!(!requires_write("mcp:result"));
+        assert!(requires_write("unknown:whatever")); // unknown → fail-closed
     }
 
     #[test]

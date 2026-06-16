@@ -11,7 +11,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt as _;
 use uuid::Uuid;
 
-use crate::proto::Message as ProtoMessage;
+use crate::proto::{Message as ProtoMessage, Permission};
 use crate::relay::SharedState;
 
 pub async fn sse_handler(
@@ -22,7 +22,7 @@ pub async fn sse_handler(
 
     if !state.server_auth.is_empty() {
         let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
-        if mcp_auth != state.server_auth {
+        if !crate::relay::auth::constant_time_eq(mcp_auth, &state.server_auth) {
             return Sse::new(
                 futures_util::stream::once(std::future::ready(Ok::<_, Infallible>(
                     Event::default()
@@ -49,7 +49,7 @@ pub async fn sse_handler(
 
     let stream = async_stream::stream! {
         let endpoint_url = {
-            let mut base = format!("/agent/mcp/messages");
+            let mut base = "/agent/mcp/messages".to_string();
             let mut sep = "?";
             if let Some(ref t) = token {
                 base.push_str(&format!("?token={}", t));
@@ -74,7 +74,7 @@ pub async fn sse_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.6"
+                                        "version": "0.1.7"
                 },
                 "capabilities": {
                     "tools": {}
@@ -122,7 +122,7 @@ pub async fn messages_handler(
     if !state.server_auth.is_empty() {
         let mcp_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
         let body_auth = body.get("auth").and_then(|v| v.as_str()).unwrap_or("");
-        if mcp_auth != state.server_auth && body_auth != state.server_auth {
+        if !crate::relay::auth::constant_time_eq(mcp_auth, &state.server_auth) && !crate::relay::auth::constant_time_eq(body_auth, &state.server_auth) {
             return Json(json!({
                 "jsonrpc": "2.0",
                 "id": body.get("id").cloned().unwrap_or(Value::Null),
@@ -144,7 +144,7 @@ pub async fn messages_handler(
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "shell-remote",
-                                        "version": "0.1.6"
+                                        "version": "0.1.7"
                 },
                 "capabilities": {
                     "tools": {}
@@ -301,7 +301,7 @@ pub async fn messages_handler(
                 result
             };
 
-            let (session_id, _permission) = match auth {
+            let (session_id, permission) = match auth {
                 Some(result) => result,
                 None => {
                     return Json(json!({
@@ -315,6 +315,24 @@ pub async fn messages_handler(
                     .into_response();
                 }
             };
+
+            let write_tools = [
+                "exec_remote", "exec_remote_start", "exec_remote_input",
+
+                "exec_remote_close", "file_remote_write", "file_remote_rename",
+                "file_remote_delete",
+            ];
+            if write_tools.contains(&tool_name) && permission == Permission::ReadOnly {
+                return Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32002,
+                        "message": "Read-only token cannot call write-type tools"
+                    }
+                }))
+                .into_response();
+            }
 
             if matches!(tool_name, "exec_remote_start" | "exec_remote_input" | "exec_remote_close" | "exec_remote_list") {
                 let request_id = Uuid::new_v4().to_string();
@@ -668,6 +686,7 @@ mod tests {
             bin_dir: None,
             agent_event_buffers: RwLock::new(HashMap::new()),
             rate_limiter: RwLock::new(RateLimiter::new()),
+            max_upload_size: 100 * 1024 * 1024,
         })
     }
 

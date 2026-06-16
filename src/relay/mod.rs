@@ -36,6 +36,7 @@ pub struct SharedState {
     pub bin_dir: Option<String>,
     pub agent_event_buffers: RwLock<HashMap<String, EventBuffer>>,
     pub rate_limiter: RwLock<RateLimiter>,
+    pub max_upload_size: u64,
 }
 
 pub struct RateLimiter {
@@ -93,7 +94,8 @@ impl EventBuffer {
 }
 
 impl SharedState {
-    pub fn new(server_auth: String, bin_dir: Option<String>) -> Self {
+    pub fn new(server_auth: String, bin_dir: Option<String>, max_upload_size: u64) -> Self {
+
         Self {
             sessions: SessionRegistry::new(),
             agent_broadcast: RwLock::new(HashMap::new()),
@@ -103,6 +105,7 @@ impl SharedState {
             bin_dir,
             agent_event_buffers: RwLock::new(HashMap::new()),
             rate_limiter: RwLock::new(RateLimiter::new()),
+            max_upload_size,
         }
     }
 
@@ -228,7 +231,7 @@ mod tests {
         use axum::Router;
         use tower_http::cors::{Any, CorsLayer};
 
-        let state = Arc::new(SharedState::new("test".into(), None));
+        let state = Arc::new(SharedState::new("test".into(), None, 100*1024*1024));
         let cors = CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
@@ -254,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_handler_unauthorized_no_token() {
-        let state = Arc::new(SharedState::new("".into(), None));
+        let state = Arc::new(SharedState::new("".into(), None, 100*1024*1024));
         let headers = HeaderMap::new();
         let params = HashMap::new();
         let body = Body::from("test content");
@@ -264,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_handler_readonly_token_forbidden() {
-        let state = Arc::new(SharedState::new("".into(), None));
+        let state = Arc::new(SharedState::new("".into(), None, 100*1024*1024));
         let (_sid, tokens) = state.sessions.register(None, "ro").await;
         let token = &tokens[0].0;
         let mut headers = HeaderMap::new();
@@ -278,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_upload_handler_missing_path() {
-        let state = Arc::new(SharedState::new("".into(), None));
+        let state = Arc::new(SharedState::new("".into(), None, 100*1024*1024));
         let (_sid, tokens) = state.sessions.register(None, "rw").await;
         let token = &tokens[0].0;
         let mut headers = HeaderMap::new();
@@ -344,6 +347,18 @@ pub async fn upload_handler(
     Query(params): Query<HashMap<String, String>>,
     body: axum::body::Body,
 ) -> Result<axum::http::StatusCode, axum::http::StatusCode> {
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    {
+        let mut rl = state.rate_limiter.write().await;
+        if !rl.check(&client_ip, 20, std::time::Duration::from_secs(60)) {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
     let token = crate::relay::auth::extract_token_from_headers_or_query(&headers, params.get("token"))
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let path = params.get("path").ok_or(StatusCode::BAD_REQUEST)?;
@@ -358,17 +373,29 @@ pub async fn upload_handler(
     }
 
     let tmp_dir = std::path::PathBuf::from("/tmp/opencode/uploads");
-    let _ = std::fs::create_dir_all(&tmp_dir);
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
     let tmp_name = format!("{}_{}", uuid::Uuid::new_v4(), path.replace('/', "_"));
     let tmp_path = tmp_dir.join(&tmp_name);
 
-    let mut file = std::fs::File::create(&tmp_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut total: u64 = 0;
     let mut stream = body.into_data_stream();
     while let Some(result) = stream.next().await {
-        let chunk = result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let chunk = result.map_err(|_| {
+            // Will clean up below
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         total += chunk.len() as u64;
-        std::io::Write::write_all(&mut file, &chunk).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if total > state.max_upload_size {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&chunk).await.map_err(|_| {
+            // Will clean up below
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     }
     drop(file);
 
@@ -426,15 +453,37 @@ pub async fn start(
     bind: String,
     _tls_cert: Option<String>,
     _tls_key: Option<String>,
-    _dev: bool,
-    server_auth: String,
+    dev: bool,
+    server_auth: Option<String>,
     bin_dir: Option<String>,
 ) -> anyhow::Result<()> {
+    let auth = match server_auth {
+        Some(a) => a,
+        None => {
+            if dev {
+                eprintln!("WARNING: Running in dev mode with no --auth password. Anyone can access this relay.");
+                String::new()
+            } else {
+                eprintln!("ERROR: --auth is required when not running in --dev mode.");
+                eprintln!("  Usage: shell-remote relay --auth YOUR_PASSWORD ...");
+                anyhow::bail!("Missing required --auth password (use --dev to skip)");
+            }
+        }
+    };
+
+    if !dev && (_tls_cert.is_none() || _tls_key.is_none()) {
+        if _tls_cert.is_some() || _tls_key.is_some() {
+            anyhow::bail!("Both --tls-cert and --tls-key must be provided together");
+        }
+        eprintln!("WARNING: Running without TLS. Passwords and tokens will be sent in plaintext.");
+        eprintln!("  Consider using --tls-cert and --tls-key for production, or --dev for development.");
+    }
+
     use axum::routing::get;
     use axum::Router;
     use tower_http::cors::{Any, CorsLayer};
 
-    let state = Arc::new(SharedState::new(server_auth, bin_dir.clone()));
+    let state = Arc::new(SharedState::new(auth, bin_dir.clone(), 100 * 1024 * 1024));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

@@ -108,6 +108,13 @@ impl Shell {
     }
 }
 
+impl Drop for Shell {
+    fn drop(&mut self) {
+        let _ = self._child.kill();
+        let _ = self._child.wait();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

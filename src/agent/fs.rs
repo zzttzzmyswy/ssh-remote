@@ -43,7 +43,7 @@ pub fn list_dir(root: &Path, user_path: &str) -> FsResultPayload {
         None => {
             return FsResultPayload {
                 success: false,
-                error: Some("Path is outside sandbox".to_string()),
+                error: Some("Invalid path".to_string()),
                 entries: None,
                 content: None,
                 path: Some(user_path.to_string()),
@@ -115,7 +115,7 @@ pub fn read_file(root: &Path, user_path: &str) -> FsResultPayload {
         None => {
             return FsResultPayload {
                 success: false,
-                error: Some("Path is outside sandbox".to_string()),
+                error: Some("Invalid path".to_string()),
                 entries: None,
                 content: None,
                 path: Some(user_path.to_string()),
@@ -164,7 +164,7 @@ pub fn write_file(root: &Path, user_path: &str, content_b64: &str) -> FsResultPa
         None => {
             return FsResultPayload {
                 success: false,
-                error: Some("Path is outside sandbox".to_string()),
+                error: Some("Invalid path".to_string()),
                 entries: None,
                 content: None,
                 path: Some(user_path.to_string()),
@@ -220,13 +220,36 @@ pub fn write_file(root: &Path, user_path: &str, content_b64: &str) -> FsResultPa
     }
 }
 
+pub fn write_file_bytes(root: &Path, user_path: &str, data: &[u8]) -> FsResultPayload {
+    let path = match resolve_path(root, user_path) {
+        Some(p) => p,
+        None => return FsResultPayload {
+            success: false, error: Some("Invalid path".into()), entries: None,
+            content: None, path: Some(user_path.to_string()), new_path: None,
+        }
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(&path, data) {
+        Ok(()) => FsResultPayload {
+            success: true, error: None, entries: None, content: None,
+            path: Some(user_path.to_string()), new_path: None,
+        },
+        Err(e) => FsResultPayload {
+            success: false, error: Some(format!("Failed to write file: {}", e)),
+            entries: None, content: None, path: Some(user_path.to_string()), new_path: None,
+        },
+    }
+}
+
 pub fn delete_path(root: &Path, user_path: &str) -> FsResultPayload {
     let path = match resolve_path(root, user_path) {
         Some(p) => p,
         None => {
             return FsResultPayload {
                 success: false,
-                error: Some("Path is outside sandbox".to_string()),
+                error: Some("Invalid path".to_string()),
                 entries: None,
                 content: None,
                 path: Some(user_path.to_string()),
@@ -239,7 +262,7 @@ pub fn delete_path(root: &Path, user_path: &str) -> FsResultPayload {
     if path == root_canonical || path == root {
         return FsResultPayload {
             success: false,
-            error: Some("Cannot delete sandbox root".to_string()),
+            error: Some("Cannot delete root directory".to_string()),
             entries: None,
             content: None,
             path: Some(user_path.to_string()),
@@ -279,7 +302,7 @@ pub fn rename_path(root: &Path, from_path: &str, to_path: &str) -> FsResultPaylo
         None => {
             return FsResultPayload {
                 success: false,
-                error: Some("Source path is outside sandbox".to_string()),
+                error: Some("Source path resolution failed".to_string()),
                 entries: None,
                 content: None,
                 path: Some(from_path.to_string()),
@@ -293,7 +316,7 @@ pub fn rename_path(root: &Path, from_path: &str, to_path: &str) -> FsResultPaylo
         None => {
             return FsResultPayload {
                 success: false,
-                error: Some("Destination path is outside sandbox".to_string()),
+                error: Some("Destination path resolution failed".to_string()),
                 entries: None,
                 content: None,
                 path: Some(from_path.to_string()),
@@ -345,7 +368,7 @@ fn get_owner(metadata: &std::fs::Metadata) -> String {
 pub fn create_dir(root: &Path, user_path: &str) -> FsResultPayload {
     let path = match resolve_path(root, user_path) {
         Some(p) => p,
-        None => return FsResultPayload { success: false, error: Some("Path invalid or escapes sandbox".into()), entries: None, content: None, path: Some(user_path.to_string()), new_path: None },
+        None => return FsResultPayload { success: false, error: Some("Invalid path".into()), entries: None, content: None, path: Some(user_path.to_string()), new_path: None },
     };
     match fs::create_dir_all(&path) {
         Ok(()) => FsResultPayload { success: true, error: None, entries: None, content: None, path: Some(user_path.to_string()), new_path: None },
@@ -420,9 +443,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_path_escape_attempt() {
+    fn test_resolve_path_traversal_resolves() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sandbox");
+        let root = dir.path().join("root_dir");
         std::fs::create_dir_all(&root).unwrap();
 
         // "../outside" resolves to dir.path(); canonicalize resolves '..' correctly
@@ -431,12 +454,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_path_absolute_escape() {
+    fn test_resolve_path_absolute_resolves() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sandbox");
+        let root = dir.path().join("root_dir");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Absolute paths are now allowed (no sandbox restriction)
+        // Absolute paths resolve normally
         let resolved = resolve_path(&root, "/etc/passwd");
         assert!(resolved.is_some());
     }
@@ -461,12 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn test_list_dir_outside_sandbox() {
+    fn test_list_dir_parent_dir() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sandbox");
+        let root = dir.path().join("root_dir");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Outside sandbox is now allowed — resolves to the parent directory
+        // Listing parent directory is allowed
         let result = list_dir(&root, "../");
         assert!(result.success);
     }
@@ -507,13 +530,13 @@ mod tests {
     }
 
     #[test]
-    fn test_write_file_outside_sandbox() {
+    fn test_write_file_parent_dir() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sandbox");
+        let root = dir.path().join("root_dir");
         std::fs::create_dir_all(&root).unwrap();
         let content_b64 = encode_b64(b"escape");
 
-        // Outside sandbox write is now allowed — writes to parent directory
+        // Writing to parent directory is allowed
         let result = write_file(&root, "../outside.txt", &content_b64);
         assert!(result.success);
     }
@@ -551,12 +574,12 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_outside_sandbox() {
+    fn test_delete_parent_dir() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sandbox");
+        let root = dir.path().join("root_dir");
         std::fs::create_dir_all(&root).unwrap();
 
-        // Outside sandbox delete is now allowed (resolves to parent)
+        // Deleting parent directory contents is allowed
         let result = delete_path(&root, "../");
         assert!(result.success);
     }
@@ -584,13 +607,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rename_outside_sandbox() {
+    fn test_rename_parent_dir() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sandbox");
+        let root = dir.path().join("root_dir");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("file.txt"), b"x").unwrap();
 
-        // Outside sandbox rename is now allowed
+        // Renaming to parent directory is allowed
         let result = rename_path(&root, "file.txt", "../outside.txt");
         assert!(result.success);
     }

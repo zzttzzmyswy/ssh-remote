@@ -57,9 +57,14 @@ async fn run_session(
     }
 
     let root_path = PathBuf::from(root);
+    if !root_path.is_dir() {
+        anyhow::bail!("Root directory does not exist or is not a directory: {}", root);
+    }
     let exec_sessions = crate::agent::exec_sessions::ExecSessionManager::new();
 
     let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+
+    let is_readonly = token_type == "ro";
 
     let first_tab_id = uuid::Uuid::new_v4().to_string();
     let mut tabs: HashMap<String, TabState> = HashMap::new();
@@ -138,6 +143,19 @@ async fn run_session(
             relay_msg = client.recv() => {
                 match relay_msg {
                     Some(msg) => {
+                        if is_readonly && crate::proto::requires_write(&msg.msg_type) {
+                            let err_resp = Message {
+                                msg_type: "error".to_string(),
+                                session_id: client.session_id.clone(),
+                                payload: serde_json::json!({
+                                    "code": "PERMISSION_DENIED",
+                                    "message": "Agent is read-only, write-type messages rejected"
+                                }),
+                            };
+                            let _ = client.send(&err_resp).await;
+                            continue;
+                        }
+
                         match msg.msg_type.as_str() {
                             "terminal:input" => {
                                 let tab_id = msg.payload["tab_id"]
@@ -304,24 +322,47 @@ async fn run_session(
                             "fs:upload" => {
                                 let temp_path = msg.payload["temp_path"].as_str().unwrap_or("");
                                 let final_path = msg.payload["final_path"].as_str().unwrap_or("");
+                                let mcp_request_id = msg.payload["_mcp_request_id"].as_str().map(|s| s.to_string());
+
+                                // Validate temp_path is under our known upload directory
+                                let temp = std::path::Path::new(temp_path);
+                                if !temp.starts_with("/tmp/opencode/uploads/") {
+                                    let result = FsResultPayload {
+                                        success: false,
+                                        error: Some("Invalid temporary upload path".into()),
+                                        entries: None, content: None,
+                                        path: Some(final_path.to_string()), new_path: None,
+                                    };
+                                    let payload = serde_json::to_value(&result).unwrap();
+                                    let resp = Message { msg_type: "fs:result".into(), session_id: client.session_id.clone(), payload };
+                                    let _ = client.send(&resp).await;
+                                    continue;
+                                }
+
                                 let result = match std::fs::read(temp_path) {
                                     Ok(data) => {
-                                        let content = fs::encode_b64(&data);
-                                        let r = fs::write_file(&root_path, final_path, &content);
+                                        let r = fs::write_file_bytes(&root_path, final_path, &data);
                                         let _ = std::fs::remove_file(temp_path);
                                         r
                                     }
                                     Err(e) => FsResultPayload {
                                         success: false,
                                         error: Some(format!("Failed to read uploaded file: {}", e)),
-                                        entries: None,
-                                        content: None,
-                                        path: Some(final_path.to_string()),
-                                        new_path: None,
+                                        entries: None, content: None,
+                                        path: Some(final_path.to_string()), new_path: None,
                                     }
                                 };
+                                if let Some(ref req_id) = mcp_request_id {
+                                    let mut payload = serde_json::to_value(&result).unwrap();
+                                    if let serde_json::Value::Object(ref mut map) = payload {
+                                        map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id.clone()));
+                                    }
+                                    let resp = Message { msg_type: "fs:result".into(), session_id: client.session_id.clone(), payload };
+                                    let _ = client.send(&resp).await;
+                                    continue;
+                                }
                                 let payload = serde_json::to_value(&result).unwrap();
-                                let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
+                                let resp = Message { msg_type: "fs:result".into(), session_id: client.session_id.clone(), payload };
                                 let _ = client.send(&resp).await;
                             }
 
@@ -473,29 +514,35 @@ async fn run_session(
         }
     }
 
+    exec_sessions.shutdown_all().await;
+    tabs.clear(); // Drop all tabs - shells kill child processes via Drop
+
     Ok(())
 }
 
 async fn execute_command(cmd: &str) -> (String, String, i32) {
     let cmd = cmd.to_string();
-    tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new("sh")
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&cmd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output();
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let exit_code = out.status.code().unwrap_or(-1);
-                (stdout, stderr, exit_code)
-            }
-            Err(e) => (String::new(), format!("Failed to execute command: {}", e), -1),
-        }
+            .kill_on_drop(true)
+            .output()
+            .await
     })
-    .await
-    .unwrap_or_else(|_| (String::new(), "Command execution panicked".to_string(), -1))
+    .await;
+
+    match result {
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1);
+            (stdout, stderr, exit_code)
+        }
+        Ok(Err(e)) => (String::new(), format!("Failed to execute command: {}", e), -1),
+        Err(_) => (String::new(), "Command timed out after 30s".to_string(), -1),
+    }
 }
