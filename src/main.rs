@@ -5,6 +5,8 @@ mod agent;
 mod proto;
 mod relay;
 mod web;
+#[cfg(test)]
+mod integration_test;
 
 #[derive(Parser)]
 #[command(name = "shell-remote", about = "Collaborative remote shell tool")]

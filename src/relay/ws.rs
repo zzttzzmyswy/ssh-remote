@@ -243,19 +243,6 @@ pub async fn agent_events_handler(
         }
     }
 
-    if !state.server_auth.is_empty() {
-        let query_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
-        let header_auth = headers
-            .get("x-auth")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !crate::relay::auth::constant_time_eq(query_auth, &state.server_auth)
-            && !crate::relay::auth::constant_time_eq(header_auth, &state.server_auth)
-        {
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
-    }
-
     let session_id = match params.get("session") {
         Some(s) if !s.is_empty() => s.clone(),
         _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),

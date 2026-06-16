@@ -1,0 +1,128 @@
+#[cfg(test)]
+mod integration_tests {
+    use std::time::Duration;
+    use std::sync::Arc;
+    use serde_json::{json, Value};
+
+    use crate::relay::ws;
+    use crate::relay::mcp;
+
+    #[tokio::test]
+    async fn test_full_workflow() {
+        let _ = tracing_subscriber::fmt().try_init();
+        let port = 19878u16;
+        let server_auth = "integration-test-pw";
+        let state = Arc::new(crate::relay::SharedState::new(
+            server_auth.to_string(),
+            None,
+            100 * 1024 * 1024,
+        ));
+
+        use axum::Router;
+        use axum::routing::get;
+
+        let app = Router::new()
+            .route("/agent", get(ws::ws_handler))
+            .route("/agent/send", axum::routing::post(ws::agent_send_handler))
+            .route("/agent/events", get(ws::agent_events_handler))
+            .route("/agent/mcp/sse", get(mcp::sse_handler))
+            .route("/agent/mcp/messages", axum::routing::post(mcp::messages_handler))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let relay_url = format!("http://127.0.0.1:{}", port);
+        let client = reqwest::Client::new();
+
+        // ── 1. Agent registers ────────────────────────────────────
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"agent:register","key":"itest","token_type":"rw"}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200, "Agent registration should succeed");
+        let reg: Value = resp.json().await.unwrap();
+        assert_eq!(reg["type"], "agent:registered");
+        let session_id = reg["session_id"].as_str().unwrap().to_string();
+        let rw_token = reg["payload"]["tokens"].as_array().unwrap()
+            .iter().find(|t| t["permission"] == "rw")
+            .and_then(|t| t["token"].as_str()).unwrap().to_string();
+        eprintln!("  [1] agent registered: session={}", session_id);
+
+        // ── 2. Agent subscribes to events ────────────────────────
+        let resp = client
+            .get(format!("{}/agent/events?session={}", relay_url, session_id))
+            .header("Accept", "text/event-stream")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        eprintln!("  [2] events stream connected");
+
+        // ── 3. Browser joins via WebSocket ────────────────────────
+        let ws_url = format!("ws://127.0.0.1:{}/agent", port);
+        let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await
+            .expect("WS connection should succeed");
+
+        use tokio_tungstenite::tungstenite::Message;
+        use futures_util::SinkExt;
+
+        let join_msg = json!({
+            "type": "browser:join",
+            "payload": {
+                "token": rw_token,
+                "server_auth": server_auth
+            }
+        }).to_string();
+
+        ws.send(Message::Text(join_msg)).await.unwrap();
+        eprintln!("  [3] browser:join sent");
+
+        // Wait briefly for the server to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Receive response (may contain session:users broadcast first)
+        let mut joined = false;
+        for _ in 0..20 {
+            match tokio::time::timeout(Duration::from_secs(2), futures_util::StreamExt::next(&mut ws)).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    eprintln!("  WS recv: {}...", &text[..text.len().min(120)]);
+                    if text.contains("user_id") {
+                        joined = true;
+                        break;
+                    }
+                }
+                Ok(Some(Ok(_))) => { eprintln!("  WS recv: non-text"); }
+                Ok(Some(Err(e))) => { eprintln!("  WS recv error: {}", e); break; }
+                Ok(None) => { eprintln!("  WS recv: stream ended"); break; }
+                Err(_) => { eprintln!("  WS recv: timeout"); }
+            }
+        }
+        assert!(joined, "Browser should receive session:join or session:users response");
+
+        // ── 4. MCP tools/list ─────────────────────────────────────
+        let resp = client
+            .post(format!("{}/agent/mcp/messages?token={}&auth={}", relay_url, rw_token, server_auth))
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let mcp: Value = resp.json().await.unwrap();
+        assert!(mcp["error"].is_null(), "MCP tools/list should not return error");
+        let tools = mcp["result"]["tools"].as_array().unwrap();
+        assert!(!tools.is_empty(), "MCP should have at least one tool");
+        eprintln!("  [4] MCP tools/list: {} tools", tools.len());
+
+        // ── 5. Auth rejection ─────────────────────────────────────
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"terminal:output","session_id":"nope","payload":{}}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 401, "Non-register messages without auth should be 401");
+
+        server_handle.abort();
+        eprintln!("  PASS — all 5 steps succeeded");
+    }
+}

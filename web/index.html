@@ -3,10 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>shell-remote — 连接</title>
+    <title>shell-remote</title>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body class="connect-page">
+
+    <!-- Connect Section -->
     <div class="connect-container">
         <h1>shell-remote</h1>
         <p class="subtitle">远程协作终端</p>
@@ -22,7 +24,54 @@
             <div id="connect-error" class="error-message hidden"></div>
         </div>
     </div>
+
+    <!-- Agent Mode Guide -->
+    <div class="guide-section">
+        <h2>Agent 模式使用说明</h2>
+
+        <h3>快速开始</h3>
+        <p>在目标机器上下载并运行 <code>shell-remote</code> 代理模式，它会连接到你的 relay 服务器。</p>
+        <pre>$ ./shell-remote-{arch} agent --relay-url https://your-relay.example.com</pre>
+
+        <h3>参数说明</h3>
+        <ul>
+            <li><code>--relay-url</code> — relay 服务器地址（支持 <code>ws://</code> / <code>wss://</code> / <code>https://</code>）</li>
+            <li><code>--key</code> — 固定密钥（可选，不指定则生成临时密钥）</li>
+            <li><code>--root</code> — 文件管理器默认目录（默认 $HOME）</li>
+            <li><code>--token-type</code> — 密钥类型（<code>rw</code> / <code>ro</code> / <code>both</code>，默认 rw）</li>
+            <li><code>--shell</code> — Shell 路径（默认 /bin/bash）</li>
+        </ul>
+
+        <h3>使用固定密钥</h3>
+        <p>固定密钥在 relay 重启后仍然有效，适合长期部署：</p>
+        <pre>$ ./shell-remote-agent agent --relay-url https://relay.example.com --key my-secret-key</pre>
+
+        <h3>只读模式</h3>
+        <p>只读 token 只能查看终端输出和文件列表，不能执行命令或修改文件：</p>
+        <pre>$ ./shell-remote-agent agent --relay-url https://relay.example.com --token-type ro</pre>
+
+        <h3>双模式 (rw + ro)</h3>
+        <p>同时生成读写和只读两个密钥：</p>
+        <pre>$ ./shell-remote-agent agent --relay-url https://relay.example.com --token-type both</pre>
+
+        <p style="margin-top:1rem;color:var(--text-muted);font-size:0.78rem;">
+            启动后 relay 会打印会话密钥，将密钥分发给浏览器用户即可远程协作。
+            二进制文件兼容 Linux 内核 3.2+，无需任何运行时依赖。
+        </p>
+    </div>
+
+    <!-- Download Section -->
+    <div class="download-section" id="download-section">
+        <h2>下载二进制文件</h2>
+        <div class="download-cards" id="download-cards"></div>
+        <div class="download-info">
+            <p>二进制文件使用 <b>musl 静态编译</b> — 无需运行时依赖，兼容任意 Linux 内核 3.2+。</p>
+            <p>也支持 <code>curl</code> 一键下载，点击卡片上的 copy 按钮复制命令。</p>
+        </div>
+    </div>
+
     <script>
+        // ── Connect logic ──────────────────────────────────────────────
         const authInput = document.getElementById('auth-input');
         const tokenInput = document.getElementById('token-input');
         const errorDiv = document.getElementById('connect-error');
@@ -57,6 +106,87 @@
         if (urlToken) {
             tokenInput.value = urlToken;
         }
+
+        // ── Download cards ────────────────────────────────────────────
+        const ARCHS = [
+            {
+                id: 'x86_64',
+                name: 'x86_64',
+                desc: 'Intel / AMD 64 位系统 — 桌面电脑、服务器、云虚拟机',
+                tags: 'Desktop · Server · VM'
+            },
+            {
+                id: 'aarch64',
+                name: 'AArch64',
+                desc: 'ARM 64 位 — 树莓派 4/5、AWS Graviton、Apple Silicon 虚拟机',
+                tags: 'Raspberry Pi 4/5 · Cloud ARM'
+            },
+            {
+                id: 'armv7',
+                name: 'ARMv7',
+                desc: 'ARM 32 位 — 树莓派 2/3、嵌入式设备',
+                tags: 'Raspberry Pi 2/3 · Embedded'
+            }
+        ];
+
+        (async () => {
+            const cards = document.getElementById('download-cards');
+            const host = location.origin;
+            let version = '0.1.8';
+            let hasLocal = false;
+
+            try {
+                const r = await fetch('/bin/x86_64', { method: 'HEAD' });
+                hasLocal = r.ok;
+            } catch (_) {}
+
+            const ua = navigator.userAgent || '';
+            let currentArch = '';
+            if (ua.includes('x86_64') || ua.includes('x86-64') || ua.includes('amd64')) currentArch = 'x86_64';
+            else if (ua.includes('aarch64') || ua.includes('arm64') || ua.includes('armv8')) currentArch = 'aarch64';
+            else if (ua.includes('armv7') || ua.includes('armv7l')) currentArch = 'armv7';
+
+            // Update version in guide examples
+            document.querySelectorAll('.guide-section pre').forEach(el => {
+                el.textContent = el.textContent.replace('{arch}', currentArch || 'x86_64');
+            });
+
+            for (const a of ARCHS) {
+                const isCurrent = a.id === currentArch;
+                const c = document.createElement('div');
+                c.className = 'download-card' + (isCurrent ? ' current' : '');
+
+                let downloadUrl, curlCmd;
+                if (hasLocal) {
+                    downloadUrl = `/bin/${a.id}`;
+                    curlCmd = `curl -fLO ${host}/bin/${a.id} && chmod +x shell-remote-${a.id}`;
+                } else {
+                    downloadUrl = `https://github.com/zzttzzmyswy/shell-remote/releases/latest/download/shell-remote-${a.id}`;
+                    curlCmd = `curl -fLO https://github.com/zzttzzmyswy/shell-remote/releases/latest/download/shell-remote-${a.id} && chmod +x shell-remote-${a.id}`;
+                }
+
+                c.innerHTML = `<h3>${a.name}</h3>
+                    <div class="tags">${a.tags}</div>
+                    <div class="desc">${a.desc}</div>
+                    <a class="btn-dl" href="${downloadUrl}" download>Download</a>
+                    <div class="curl-cmd">
+                        <span>$</span> ${curlCmd}
+                        <button class="copy-btn">copy</button>
+                    </div>`;
+
+                c.querySelector('.copy-btn').onclick = (e) => {
+                    e.preventDefault();
+                    navigator.clipboard.writeText(curlCmd).then(() => {
+                        const btn = e.target;
+                        btn.textContent = 'copied!';
+                        btn.classList.add('copied');
+                        setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+                    });
+                };
+
+                cards.appendChild(c);
+            }
+        })();
     </script>
 </body>
 </html>

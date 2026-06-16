@@ -52,9 +52,11 @@ body {
 /* Connect Page */
 .connect-page {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
     background: radial-gradient(ellipse at center, #161b22 0%, #0d1117 70%);
+    min-height: 100vh;
+    overflow-y: auto;
 }
 
 .connect-container {
@@ -612,3 +614,157 @@ body {
 }
 
 .context-menu-item:hover { background: rgba(88, 166, 255, 0.12); }
+
+/* Guide Section (agent usage) */
+.guide-section {
+    max-width: 680px;
+    width: 100%;
+    padding: 2.5rem 2rem;
+    text-align: left;
+    border-top: 1px solid var(--border);
+    margin-top: 1rem;
+}
+.guide-section h2 {
+    font-size: 1.1rem;
+    color: var(--text-primary);
+    margin-bottom: 1.2rem;
+    text-align: center;
+}
+.guide-section h3 {
+    font-size: 0.9rem;
+    color: var(--accent);
+    margin-top: 1.2rem;
+    margin-bottom: 0.5rem;
+}
+.guide-section p, .guide-section li {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+}
+.guide-section code {
+    background: var(--bg-tertiary);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.78rem;
+    color: var(--accent);
+}
+.guide-section pre {
+    background: var(--bg-tertiary);
+    padding: 0.8rem 1rem;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    color: #7ee787;
+    overflow-x: auto;
+    line-height: 1.6;
+    margin: 0.5rem 0;
+}
+.guide-section ul {
+    padding-left: 1.2rem;
+    margin: 0.5rem 0;
+}
+
+/* Download Section (on homepage) */
+.download-section {
+    max-width: 900px;
+    width: 100%;
+    padding: 2rem;
+    border-top: 1px solid var(--border);
+    margin-top: 1rem;
+    padding-bottom: 4rem;
+}
+.download-section h2 {
+    font-size: 1.1rem;
+    color: var(--text-primary);
+    margin-bottom: 1.2rem;
+    text-align: center;
+}
+.download-cards {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+.download-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.2rem;
+    width: 260px;
+    display: flex;
+    flex-direction: column;
+}
+.download-card.current { border-color: var(--accent); }
+.download-card h3 {
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    margin-bottom: 0.3rem;
+    font-family: var(--font-mono);
+}
+.download-card .tags {
+    display: inline-block;
+    background: rgba(31, 111, 235, 0.13);
+    color: var(--accent);
+    font-size: 0.65rem;
+    padding: 2px 7px;
+    border-radius: 10px;
+    margin-bottom: 0.7rem;
+}
+.download-card .desc {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.8rem;
+    flex: 1;
+}
+.download-card .btn-dl {
+    display: block;
+    text-align: center;
+    padding: 8px 0;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    text-decoration: none;
+    background: #238636;
+    color: #fff;
+    margin-bottom: 0.5rem;
+    transition: background 0.15s;
+}
+.download-card .btn-dl:hover { background: #2ea043; }
+.download-card .curl-cmd {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 40px 7px 10px;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: #7ee787;
+    position: relative;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+.download-card .curl-cmd span { color: var(--text-secondary); }
+.download-card .copy-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    background: var(--bg-tertiary);
+    border: none;
+    color: var(--text-secondary);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.6rem;
+    cursor: pointer;
+    font-family: var(--font-mono);
+}
+.download-card .copy-btn.copied { color: var(--success); }
+.download-info {
+    margin-top: 1.5rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+.download-info code {
+    background: var(--bg-tertiary);
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 0.73rem;
+}
