@@ -17,12 +17,11 @@ use uuid::Uuid;
 use crate::proto::{Message as ProtoMessage, Permission};
 use crate::relay::SharedState;
 
-/// Wraps an SSE receiver stream so that when the stream is dropped
-/// (SSE client disconnects), the MCP session is cleaned up.
-struct SseCleanup {
-    inner: UnboundedReceiverStream<String>,
-    state: Arc<SharedState>,
-    sid: String,
+pub(crate) struct SseCleanup {
+    pub inner: UnboundedReceiverStream<String>,
+    pub state: Arc<SharedState>,
+    pub sid: String,
+    pub on_drop: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl tokio_stream::Stream for SseCleanup {
@@ -36,8 +35,12 @@ impl Drop for SseCleanup {
     fn drop(&mut self) {
         let state = self.state.clone();
         let sid = self.sid.clone();
+        let on_drop = self.on_drop.take();
         tokio::spawn(async move {
-            state.mcp_sse_channels.write().await.remove(&sid);
+            state.sse_sessions.write().await.remove(&sid);
+            if let Some(f) = on_drop {
+                f();
+            }
         });
     }
 }
@@ -70,7 +73,7 @@ pub async fn sse_handler(
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     {
-        let mut channels = state.mcp_sse_channels.write().await;
+        let mut channels = state.sse_sessions.write().await;
         channels.insert(mcp_session_id.clone(), tx);
     }
 
@@ -88,6 +91,7 @@ pub async fn sse_handler(
             inner: UnboundedReceiverStream::new(rx),
             state: state.clone(),
             sid: mcp_session_id,
+            on_drop: None,
         };
         let mut rx_stream = rx_stream;
         while let Some(msg) = tokio_stream::StreamExt::next(&mut rx_stream).await {
@@ -150,7 +154,7 @@ pub async fn messages_handler(
     };
 
     let sse_tx = {
-        let channels = state.mcp_sse_channels.read().await;
+        let channels = state.sse_sessions.read().await;
         match channels.get(&mcp_session_id).cloned() {
             Some(tx) => tx,
             None => return (axum::http::StatusCode::NOT_FOUND, "SSE session not found").into_response(),
@@ -329,14 +333,14 @@ mod tests {
             agent_event_buffers: RwLock::new(HashMap::new()),
             rate_limiter: RwLock::new(RateLimiter::new()),
             max_upload_size: 100 * 1024 * 1024,
-            mcp_sse_channels: RwLock::new(HashMap::new()),
+            sse_sessions: RwLock::new(HashMap::new()),
         })
     }
 
     async fn mcp_send_and_recv(state: &Arc<SharedState>, params: HashMap<String, String>, body: Value) -> Value {
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let sid = uuid::Uuid::new_v4().to_string();
-        state.mcp_sse_channels.write().await.insert(sid.clone(), tx);
+        state.sse_sessions.write().await.insert(sid.clone(), tx);
         let mut p = params;
         p.insert("sessionId".into(), sid);
         let resp = messages_handler(State(state.clone()), axum::http::HeaderMap::new(), Query(p), axum::Json(body)).await.into_response();

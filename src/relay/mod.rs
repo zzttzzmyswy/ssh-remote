@@ -16,13 +16,13 @@ use crate::relay::session::SessionRegistry;
 #[allow(dead_code)]
 pub struct ChannelMap {
     pub agent: Option<mpsc::UnboundedSender<String>>,
-    pub browsers: HashMap<String, mpsc::UnboundedSender<String>>,
+    pub browser_sessions: HashMap<String, String>,
 }
 
 #[allow(dead_code)]
 impl ChannelMap {
     pub fn new() -> Self {
-        Self { agent: None, browsers: HashMap::new() }
+        Self { agent: None, browser_sessions: HashMap::new() }
     }
 }
 
@@ -37,7 +37,7 @@ pub struct SharedState {
     pub agent_event_buffers: RwLock<HashMap<String, EventBuffer>>,
     pub rate_limiter: RwLock<RateLimiter>,
     pub max_upload_size: u64,
-    pub mcp_sse_channels: RwLock<HashMap<String, mpsc::UnboundedSender<String>>>,
+    pub sse_sessions: RwLock<HashMap<String, mpsc::UnboundedSender<String>>>,
 }
 
 pub struct RateLimiter {
@@ -107,7 +107,7 @@ impl SharedState {
             agent_event_buffers: RwLock::new(HashMap::new()),
             rate_limiter: RwLock::new(RateLimiter::new()),
             max_upload_size,
-            mcp_sse_channels: RwLock::new(HashMap::new()),
+            sse_sessions: RwLock::new(HashMap::new()),
         }
     }
 
