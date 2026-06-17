@@ -60,13 +60,16 @@ impl ExecSessionManager {
     pub async fn spawn(&self, cmd: &str) -> Result<ExecResultPayload, ExecResultPayload> {
         {
             let sessions = self.sessions.read().await;
-            let running_count = sessions.values().filter(|s| {
-                if let Ok(status) = s.status.try_read() {
-                    *status == ExecStatus::Running
-                } else {
-                    true // Can't read lock, treat as running for safety
-                }
-            }).count();
+            let running_count = sessions
+                .values()
+                .filter(|s| {
+                    if let Ok(status) = s.status.try_read() {
+                        *status == ExecStatus::Running
+                    } else {
+                        true // Can't read lock, treat as running for safety
+                    }
+                })
+                .count();
             if running_count >= self.max_sessions {
                 return Err(ExecResultPayload {
                     exec_id: String::new(),
@@ -340,10 +343,7 @@ impl ExecSessionManager {
         })
     }
 
-    pub async fn close(
-        &self,
-        exec_id: &str,
-    ) -> Result<ExecResultPayload, ExecResultPayload> {
+    pub async fn close(&self, exec_id: &str) -> Result<ExecResultPayload, ExecResultPayload> {
         let session = {
             let sessions = self.sessions.read().await;
             match sessions.get(exec_id) {
@@ -485,7 +485,11 @@ mod tests {
         }
         let result = mgr.spawn("echo fail").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().error.unwrap().contains("Max concurrent"));
+        assert!(result
+            .unwrap_err()
+            .error
+            .unwrap()
+            .contains("Max concurrent"));
         for id in ids {
             let _ = mgr.close(&id).await;
         }

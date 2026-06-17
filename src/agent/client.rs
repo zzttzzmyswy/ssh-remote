@@ -1,7 +1,7 @@
 use anyhow::{bail, Context};
-use tokio_stream::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 
 use crate::proto::Message as ProtoMessage;
 
@@ -37,24 +37,35 @@ impl RelayClient {
             "token_type": token_type
         });
 
-        let resp = http_client.post(&send_url)
+        let resp = http_client
+            .post(&send_url)
             .json(&register_msg)
             .send()
             .await
             .context("Failed to POST register message")?;
 
         let status = resp.status();
-        let body_text = resp.text().await.context("Failed to read register response")?;
+        let body_text = resp
+            .text()
+            .await
+            .context("Failed to read register response")?;
 
         if !status.is_success() {
             anyhow::bail!("Registration failed (HTTP {}): {}", status, body_text);
         }
 
-        let response: serde_json::Value = serde_json::from_str(&body_text)
-            .with_context(|| format!("Failed to parse register response (status {}): {}", status, &body_text[..body_text.len().min(500)]))?;
+        let response: serde_json::Value = serde_json::from_str(&body_text).with_context(|| {
+            format!(
+                "Failed to parse register response (status {}): {}",
+                status,
+                &body_text[..body_text.len().min(500)]
+            )
+        })?;
 
-        let session_id = response["session_id"].as_str()
-            .context("Missing session_id in register response")?.to_string();
+        let session_id = response["session_id"]
+            .as_str()
+            .context("Missing session_id in register response")?
+            .to_string();
 
         let events_url = format!("{}/agent/events?session={}", base, session_id);
 
@@ -62,17 +73,24 @@ impl RelayClient {
 
         let sse_client = http_client.clone();
         let sse_task = tokio::spawn(async move {
-            let mut stream = match sse_client.get(&events_url)
+            let mut stream = match sse_client
+                .get(&events_url)
                 .header("Accept", "text/event-stream")
                 .header("Cache-Control", "no-cache")
-                .send().await
+                .send()
+                .await
             {
                 Ok(resp) => {
                     let status = resp.status();
-                    let ct = resp.headers().get("content-type")
+                    let ct = resp
+                        .headers()
+                        .get("content-type")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("");
-                    eprintln!("[agent] SSE connected: status={}, content-type={}", status, ct);
+                    eprintln!(
+                        "[agent] SSE connected: status={}, content-type={}",
+                        status, ct
+                    );
                     resp.bytes_stream()
                 }
                 Err(e) => {
@@ -95,7 +113,11 @@ impl RelayClient {
                                 if let Some(data) = line.strip_prefix("data:") {
                                     event_count += 1;
                                     if event_count <= 3 {
-                                        eprintln!("[agent] SSE event #{}: {}", event_count, data.trim());
+                                        eprintln!(
+                                            "[agent] SSE event #{}: {}",
+                                            event_count,
+                                            data.trim()
+                                        );
                                     }
                                     let _ = tx.send(data.trim().to_string());
                                 }
@@ -127,22 +149,31 @@ impl RelayClient {
         Ok(client)
     }
 
-    fn handle_register_response(client: &mut Self, response: &serde_json::Value) -> anyhow::Result<()> {
+    fn handle_register_response(
+        client: &mut Self,
+        response: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         let msg_type = response["type"].as_str().unwrap_or("");
         if msg_type != "agent:registered" {
             bail!("Unexpected register response type: {}", msg_type);
         }
 
-        client.session_id = response["session_id"].as_str()
-            .context("Missing session_id")?.to_string();
+        client.session_id = response["session_id"]
+            .as_str()
+            .context("Missing session_id")?
+            .to_string();
 
         let payload = &response["payload"];
         if let Some(tokens_array) = payload["tokens"].as_array() {
             for t in tokens_array {
-                let token = t["token"].as_str()
-                    .context("Missing token in tokens array")?.to_string();
-                let permission = t["permission"].as_str()
-                    .context("Missing permission in tokens array")?.to_string();
+                let token = t["token"]
+                    .as_str()
+                    .context("Missing token in tokens array")?
+                    .to_string();
+                let permission = t["permission"]
+                    .as_str()
+                    .context("Missing permission in tokens array")?
+                    .to_string();
                 client.tokens.push((token, permission));
             }
         }
@@ -169,7 +200,9 @@ impl RelayClient {
                     }
                     tracing::warn!(
                         "Connection attempt {} failed: {}. Retrying in {:?}...",
-                        attempt + 1, e, delay
+                        attempt + 1,
+                        e,
+                        delay
                     );
                     tokio::time::sleep(delay).await;
                     delay = std::cmp::min(delay * 2, max_delay);
@@ -181,9 +214,11 @@ impl RelayClient {
     }
 
     async fn send_raw(&mut self, text: &str) -> anyhow::Result<()> {
-        let body: serde_json::Value = serde_json::from_str(text)
-            .context("Failed to parse outgoing message")?;
-        let resp = self.transport.client
+        let body: serde_json::Value =
+            serde_json::from_str(text).context("Failed to parse outgoing message")?;
+        let resp = self
+            .transport
+            .client
             .post(&self.transport.send_url)
             .json(&body)
             .send()
@@ -192,7 +227,11 @@ impl RelayClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("Agent POST failed ({}): {}", status, &body[..body.len().min(200)]);
+            tracing::warn!(
+                "Agent POST failed ({}): {}",
+                status,
+                &body[..body.len().min(200)]
+            );
         }
         Ok(())
     }
@@ -209,15 +248,13 @@ impl RelayClient {
     pub async fn recv(&mut self) -> Option<ProtoMessage> {
         loop {
             match self.recv_raw().await {
-                Some(text) => {
-                    match serde_json::from_str::<ProtoMessage>(&text) {
-                        Ok(msg) => return Some(msg),
-                        Err(e) => {
-                            tracing::warn!("Failed to parse relay message: {}", e);
-                            continue;
-                        }
+                Some(text) => match serde_json::from_str::<ProtoMessage>(&text) {
+                    Ok(msg) => return Some(msg),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse relay message: {}", e);
+                        continue;
                     }
-                }
+                },
                 None => return None,
             }
         }

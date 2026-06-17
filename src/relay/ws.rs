@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
-use crate::proto::{Message as ProtoMessage, Permission, TokenType, requires_write};
+use crate::proto::{requires_write, Message as ProtoMessage, Permission, TokenType};
 
 use crate::relay::ChannelMap;
 use crate::relay::SharedState;
@@ -20,8 +20,13 @@ use crate::relay::SharedState;
 pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str: &str) {
     if let Ok(proto_msg) = serde_json::from_str::<ProtoMessage>(text_str) {
         let broadcast_types = [
-            "session:users", "session:tab_list", "session:tab_switched",
-            "terminal:output", "fs:result", "fs:mkdir", "mcp:result",
+            "session:users",
+            "session:tab_list",
+            "session:tab_switched",
+            "terminal:output",
+            "fs:result",
+            "fs:mkdir",
+            "mcp:result",
         ];
         if broadcast_types.contains(&proto_msg.msg_type.as_str()) {
             let is_mcp_rpc = proto_msg.payload.get("_mcp_request_id").is_some();
@@ -29,7 +34,8 @@ pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, tex
                 let sse_sessions = state.sse_sessions.read().await;
                 let broadcast = state.agent_broadcast.read().await;
                 if let Some(channel_map) = broadcast.get(session_id) {
-                    let target_user = proto_msg.payload
+                    let target_user = proto_msg
+                        .payload
                         .get("_target_user_id")
                         .and_then(|v| v.as_str());
                     for (uid, sse_sid) in &channel_map.browser_sessions {
@@ -45,7 +51,11 @@ pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, tex
 
         // MCP oneshot
         if proto_msg.msg_type == "mcp:result" || proto_msg.msg_type == "mcp:exec_result" {
-            if let Some(request_id) = proto_msg.payload.get("_mcp_request_id").and_then(|v| v.as_str()) {
+            if let Some(request_id) = proto_msg
+                .payload
+                .get("_mcp_request_id")
+                .and_then(|v| v.as_str())
+            {
                 let mut pending = state.pending_mcp.write().await;
                 if let Some((_sid, tx)) = pending.remove(request_id) {
                     let result_text = if proto_msg.msg_type == "mcp:exec_result" {
@@ -64,7 +74,11 @@ pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, tex
 
         // FS oneshot
         if proto_msg.msg_type == "fs:result" {
-            if let Some(request_id) = proto_msg.payload.get("_mcp_request_id").and_then(|v| v.as_str()) {
+            if let Some(request_id) = proto_msg
+                .payload
+                .get("_mcp_request_id")
+                .and_then(|v| v.as_str())
+            {
                 let mut pending = state.pending_mcp.write().await;
                 if let Some((_sid, tx)) = pending.remove(request_id) {
                     let result_text = serde_json::to_string(&json!({
@@ -97,32 +111,50 @@ pub async fn agent_send_handler(
         let token_type_str = body["token_type"].as_str().unwrap_or("rw");
         let token_type = crate::proto::TokenType::from_str_val(token_type_str)
             .unwrap_or(crate::proto::TokenType::Rw);
-        let (session_id, tokens) = state.sessions.register(fixed_key.clone(), token_type.as_str()).await;
+        let (session_id, tokens) = state
+            .sessions
+            .register(fixed_key.clone(), token_type.as_str())
+            .await;
 
-        let tokens_json: Vec<Value> = tokens.iter().map(|(token, perm)| {
-            let perm_str = match perm { Permission::ReadWrite => "rw", Permission::ReadOnly => "ro" };
-            json!({"token": token, "permission": perm_str})
-        }).collect();
+        let tokens_json: Vec<Value> = tokens
+            .iter()
+            .map(|(token, perm)| {
+                let perm_str = match perm {
+                    Permission::ReadWrite => "rw",
+                    Permission::ReadOnly => "ro",
+                };
+                json!({"token": token, "permission": perm_str})
+            })
+            .collect();
 
-        let key_info = fixed_key.as_ref().map(|k| format!("key:{}", k)).unwrap_or_else(|| "temp".to_string());
+        let key_info = fixed_key
+            .as_ref()
+            .map(|k| format!("key:{}", k))
+            .unwrap_or_else(|| "temp".to_string());
         tracing::info!("Session {} created ({}) HTTP-mode", session_id, key_info);
         println!("Session: {}", session_id);
         println!("  {}", key_info);
         for (token, perm) in &tokens {
-            let perm_str = match perm { Permission::ReadWrite => "rw", Permission::ReadOnly => "ro" };
+            let perm_str = match perm {
+                Permission::ReadWrite => "rw",
+                Permission::ReadOnly => "ro",
+            };
             println!("  {} -> {}", perm_str, token);
         }
 
         {
             let mut broadcast = state.agent_broadcast.write().await;
-            broadcast.entry(session_id.clone()).or_insert_with(ChannelMap::new);
+            broadcast
+                .entry(session_id.clone())
+                .or_insert_with(ChannelMap::new);
         }
 
         return Json(json!({
             "type": "agent:registered",
             "session_id": session_id,
             "payload": { "tokens": tokens_json }
-        })).into_response();
+        }))
+        .into_response();
     }
 
     // All other message types require server auth, unless they carry a valid session_id
@@ -144,7 +176,11 @@ pub async fn agent_send_handler(
             if !crate::relay::auth::constant_time_eq(auth_header, &state.server_auth)
                 && !crate::relay::auth::constant_time_eq(body_auth, &state.server_auth)
             {
-                return (axum::http::StatusCode::UNAUTHORIZED, "Invalid server password").into_response();
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "Invalid server password",
+                )
+                    .into_response();
             }
         }
     }
@@ -257,7 +293,13 @@ pub async fn browser_sse_handler(
 ) -> impl IntoResponse {
     let token = match params.get("token") {
         Some(t) => t.clone(),
-        None => return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "Missing token"}))).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "Missing token"})),
+            )
+                .into_response()
+        }
     };
 
     let session_id = match params.get("session") {
@@ -267,11 +309,21 @@ pub async fn browser_sse_handler(
 
     let (auth_session_id, permission) = match state.sessions.authenticate(&token).await {
         Some(r) => r,
-        None => return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "Invalid token"}))).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "Invalid token"})),
+            )
+                .into_response()
+        }
     };
 
     if auth_session_id != session_id {
-        return (axum::http::StatusCode::FORBIDDEN, "Token does not belong to this session").into_response();
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "Token does not belong to this session",
+        )
+            .into_response();
     }
 
     let user_id = Uuid::new_v4().to_string();
@@ -282,7 +334,10 @@ pub async fn browser_sse_handler(
         state.sse_sessions.write().await.insert(sse_sid.clone(), tx);
     }
 
-    let perm_str = match permission { Permission::ReadWrite => "rw", Permission::ReadOnly => "ro" };
+    let perm_str = match permission {
+        Permission::ReadWrite => "rw",
+        Permission::ReadOnly => "ro",
+    };
 
     {
         let mut broadcast = state.agent_broadcast.write().await;
@@ -296,7 +351,8 @@ pub async fn browser_sse_handler(
         "type": "session:join",
         "session_id": session_id,
         "payload": { "user_id": user_id, "permission": perm_str }
-    }).to_string();
+    })
+    .to_string();
     {
         let broadcast = state.agent_broadcast.read().await;
         if let Some(cm) = broadcast.get(&session_id) {
@@ -316,7 +372,8 @@ pub async fn browser_sse_handler(
                 "type": "session:users",
                 "session_id": session_id,
                 "payload": { "count": count }
-            }).to_string();
+            })
+            .to_string();
             for sse_sid_val in cm.browser_sessions.values() {
                 if let Some(stx) = sse_sessions.get(sse_sid_val) {
                     let _ = stx.send(users_msg.clone());
@@ -363,7 +420,8 @@ pub async fn browser_sse_handler(
                     "type": "session:users",
                     "session_id": sid,
                     "payload": { "count": count }
-                }).to_string();
+                })
+                .to_string();
                 {
                     let sse_sessions = s.sse_sessions.read().await;
                     let broadcast = s.agent_broadcast.read().await;
@@ -381,7 +439,8 @@ pub async fn browser_sse_handler(
                     "type": "session:leave",
                     "session_id": sid,
                     "payload": { "user_id": uid, "permission": perm }
-                }).to_string();
+                })
+                .to_string();
                 let broadcast = s.agent_broadcast.read().await;
                 if let Some(cm) = broadcast.get(&sid) {
                     if let Some(ref agent_tx) = cm.agent {
@@ -423,30 +482,60 @@ pub async fn browser_send_handler(
 ) -> impl IntoResponse {
     let session_id = match body["session_id"].as_str() {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Missing session_id"}))).into_response(),
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "Missing session_id"})),
+            )
+                .into_response()
+        }
     };
 
     let token = match body["token"].as_str() {
         Some(t) => t,
-        None => return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "Missing token"}))).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "Missing token"})),
+            )
+                .into_response()
+        }
     };
 
     let (auth_session_id, permission) = match state.sessions.authenticate(token).await {
         Some(r) => r,
-        None => return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "Invalid token"}))).into_response(),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "Invalid token"})),
+            )
+                .into_response()
+        }
     };
 
     if auth_session_id != session_id {
-        return (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({"error": "Token does not belong to this session"}))).into_response();
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(json!({"error": "Token does not belong to this session"})),
+        )
+            .into_response();
     }
 
     let msg_type = body["type"].as_str().unwrap_or("");
     if msg_type.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Missing message type"}))).into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "Missing message type"})),
+        )
+            .into_response();
     }
 
     if requires_write(msg_type) && permission == Permission::ReadOnly {
-        return (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({"error": "Read-only users cannot send write-type messages"}))).into_response();
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(json!({"error": "Read-only users cannot send write-type messages"})),
+        )
+            .into_response();
     }
 
     {
@@ -467,7 +556,6 @@ pub async fn browser_send_handler(
 
     axum::http::StatusCode::ACCEPTED.into_response()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -491,15 +579,29 @@ mod tests {
         })
     }
 
-    async fn insert_channel_map(state: &Arc<SharedState>, session_id: &str) -> (mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>) {
+    async fn insert_channel_map(
+        state: &Arc<SharedState>,
+        session_id: &str,
+    ) -> (
+        mpsc::UnboundedSender<String>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
         let mut cm = ChannelMap::new();
         cm.agent = Some(tx.clone());
-        state.agent_broadcast.write().await.insert(session_id.to_string(), cm);
+        state
+            .agent_broadcast
+            .write()
+            .await
+            .insert(session_id.to_string(), cm);
         (tx, rx)
     }
 
-    async fn add_browser(state: &Arc<SharedState>, session_id: &str, user_id: &str) -> mpsc::UnboundedReceiver<String> {
+    async fn add_browser(
+        state: &Arc<SharedState>,
+        session_id: &str,
+        user_id: &str,
+    ) -> mpsc::UnboundedReceiver<String> {
         let sse_sid = format!("bs_test_{}", Uuid::new_v4());
         let (tx, rx) = mpsc::unbounded_channel::<String>();
         state.sse_sessions.write().await.insert(sse_sid.clone(), tx);
@@ -519,7 +621,8 @@ mod tests {
         let mut rx1 = add_browser(&state, "sid1", "user1").await;
         let mut rx2 = add_browser(&state, "sid1", "user2").await;
 
-        let msg = json!({"type":"terminal:output","session_id":"sid1","payload":{"data":"hello"}}).to_string();
+        let msg = json!({"type":"terminal:output","session_id":"sid1","payload":{"data":"hello"}})
+            .to_string();
         route_agent_message(&state, "sid1", &msg).await;
 
         assert!(rx1.try_recv().is_ok());
@@ -543,7 +646,8 @@ mod tests {
     #[tokio::test]
     async fn test_route_agent_message_missing_session_no_panic() {
         let state = make_state("");
-        let msg = json!({"type":"terminal:output","session_id":"nonexistent","payload":{}}).to_string();
+        let msg =
+            json!({"type":"terminal:output","session_id":"nonexistent","payload":{}}).to_string();
         route_agent_message(&state, "nonexistent", &msg).await;
     }
 
@@ -553,7 +657,11 @@ mod tests {
         insert_channel_map(&state, "sid1").await;
 
         let (tx, mut rx) = oneshot::channel::<String>();
-        state.pending_mcp.write().await.insert("req1".to_string(), ("sid1".to_string(), tx));
+        state
+            .pending_mcp
+            .write()
+            .await
+            .insert("req1".to_string(), ("sid1".to_string(), tx));
 
         let msg = json!({"type":"mcp:result","session_id":"sid1","payload":{"stdout":"hello","stderr":"","exit_code":0,"_mcp_request_id":"req1"}}).to_string();
         route_agent_message(&state, "sid1", &msg).await;
@@ -569,7 +677,11 @@ mod tests {
         insert_channel_map(&state, "sid1").await;
 
         let (tx, mut rx) = oneshot::channel::<String>();
-        state.pending_mcp.write().await.insert("fs1".to_string(), ("sid1".to_string(), tx));
+        state
+            .pending_mcp
+            .write()
+            .await
+            .insert("fs1".to_string(), ("sid1".to_string(), tx));
 
         let msg = json!({"type":"fs:result","session_id":"sid1","payload":{"success":true,"error":"","content":"ok","path":"/tmp/x","_mcp_request_id":"fs1"}}).to_string();
         route_agent_message(&state, "sid1", &msg).await;
@@ -592,7 +704,9 @@ mod tests {
         let state = make_state("");
         let body = json!({"type":"agent:register","token_type":"rw"});
         let headers = axum::http::HeaderMap::new();
-        let resp = agent_send_handler(State(state), headers, Json(body)).await.into_response();
+        let resp = agent_send_handler(State(state), headers, Json(body))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 200);
     }
 
@@ -601,7 +715,9 @@ mod tests {
         let state = make_state("");
         let body = json!({"type":"terminal:output","payload":{"data":"x"}});
         let headers = axum::http::HeaderMap::new();
-        let resp = agent_send_handler(State(state), headers, Json(body)).await.into_response();
+        let resp = agent_send_handler(State(state), headers, Json(body))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 400);
     }
 
@@ -612,7 +728,9 @@ mod tests {
         let state = make_state("");
         let params = HashMap::new();
         let headers = axum::http::HeaderMap::new();
-        let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
+        let resp = agent_events_handler(State(state), headers, Query(params))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 400);
     }
 
@@ -622,18 +740,26 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("session".to_string(), "nonexistent".to_string());
         let headers = axum::http::HeaderMap::new();
-        let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
+        let resp = agent_events_handler(State(state), headers, Query(params))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 404);
     }
 
     #[tokio::test]
     async fn test_agent_events_valid_session_returns_200() {
         let state = make_state("");
-        state.agent_broadcast.write().await.insert("sid1".to_string(), ChannelMap::new());
+        state
+            .agent_broadcast
+            .write()
+            .await
+            .insert("sid1".to_string(), ChannelMap::new());
         let mut params = HashMap::new();
         params.insert("session".to_string(), "sid1".to_string());
         let headers = axum::http::HeaderMap::new();
-        let resp = agent_events_handler(State(state), headers, Query(params)).await.into_response();
+        let resp = agent_events_handler(State(state), headers, Query(params))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 200);
     }
 
@@ -643,7 +769,9 @@ mod tests {
     async fn test_browser_send_missing_session_id() {
         let state = make_state("");
         let body = json!({"token": "some_token", "type": "terminal:input", "payload": {}});
-        let resp = browser_send_handler(State(state), Json(body)).await.into_response();
+        let resp = browser_send_handler(State(state), Json(body))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 400);
     }
 
@@ -651,7 +779,9 @@ mod tests {
     async fn test_browser_send_missing_token() {
         let state = make_state("");
         let body = json!({"session_id": "sid1", "type": "terminal:input", "payload": {}});
-        let resp = browser_send_handler(State(state), Json(body)).await.into_response();
+        let resp = browser_send_handler(State(state), Json(body))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 401);
     }
 
@@ -660,9 +790,16 @@ mod tests {
         let state = make_state("");
         let (sid, tokens) = state.sessions.register(None, "ro").await;
         let token = &tokens[0].0;
-        state.agent_broadcast.write().await.insert(sid.clone(), ChannelMap::new());
-        let body = json!({"session_id": sid, "token": token, "type": "terminal:input", "payload": {}});
-        let resp = browser_send_handler(State(state), Json(body)).await.into_response();
+        state
+            .agent_broadcast
+            .write()
+            .await
+            .insert(sid.clone(), ChannelMap::new());
+        let body =
+            json!({"session_id": sid, "token": token, "type": "terminal:input", "payload": {}});
+        let resp = browser_send_handler(State(state), Json(body))
+            .await
+            .into_response();
         assert_eq!(resp.status(), 403);
     }
 }

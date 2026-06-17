@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tokio_stream::StreamExt as _;
 use tokio_stream::Stream;
+use tokio_stream::StreamExt as _;
 use uuid::Uuid;
 
 use crate::proto::{Message as ProtoMessage, Permission};
@@ -56,15 +56,17 @@ pub async fn sse_handler(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let query_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
-        let auth = if header_auth.is_empty() { query_auth } else { header_auth };
+        let auth = if header_auth.is_empty() {
+            query_auth
+        } else {
+            header_auth
+        };
         if !crate::relay::auth::constant_time_eq(auth, &state.server_auth) {
-            return Sse::new(
-                tokio_stream::once(Ok::<_, Infallible>(
-                    Event::default()
-                        .event("error")
-                        .data(r#"{"code":"AUTH_INVALID_PASSWORD","message":"Invalid server password"}"#),
-                )),
-            )
+            return Sse::new(tokio_stream::once(Ok::<_, Infallible>(
+                Event::default().event("error").data(
+                    r#"{"code":"AUTH_INVALID_PASSWORD","message":"Invalid server password"}"#,
+                ),
+            )))
             .into_response();
         }
     }
@@ -124,7 +126,11 @@ pub async fn messages_handler(
             .to_string();
         let mut rl = state.rate_limiter.write().await;
         if !rl.check(&client_ip, 60, std::time::Duration::from_secs(60)) {
-            return (axum::http::StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response();
+            return (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests",
+            )
+                .into_response();
         }
     }
 
@@ -136,15 +142,20 @@ pub async fn messages_handler(
             .unwrap_or("");
         let query_auth = params.get("auth").map(|s| s.as_str()).unwrap_or("");
         let body_auth = body.get("auth").and_then(|v| v.as_str()).unwrap_or("");
-        let auth = if !header_auth.is_empty() { header_auth }
-            else if !query_auth.is_empty() { query_auth }
-            else { body_auth };
+        let auth = if !header_auth.is_empty() {
+            header_auth
+        } else if !query_auth.is_empty() {
+            query_auth
+        } else {
+            body_auth
+        };
         if !crate::relay::auth::constant_time_eq(auth, &state.server_auth) {
             return Json(json!({
                 "jsonrpc": "2.0",
                 "id": body.get("id").cloned().unwrap_or(Value::Null),
                 "error": {"code": -32001, "message": "Invalid server password"}
-            })).into_response();
+            }))
+            .into_response();
         }
     }
 
@@ -157,7 +168,9 @@ pub async fn messages_handler(
         let channels = state.sse_sessions.read().await;
         match channels.get(&mcp_session_id).cloned() {
             Some(tx) => tx,
-            None => return (axum::http::StatusCode::NOT_FOUND, "SSE session not found").into_response(),
+            None => {
+                return (axum::http::StatusCode::NOT_FOUND, "SSE session not found").into_response()
+            }
         }
     };
 
@@ -198,8 +211,6 @@ async fn process_mcp_request(
             }
         }),
 
-
-
         "tools/list" => json!({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -223,22 +234,32 @@ async fn process_mcp_request(
         }),
 
         "tools/call" => {
-            let tool_name = body.get("params").and_then(|p| p.get("name").and_then(|n| n.as_str())).unwrap_or("");
+            let tool_name = body
+                .get("params")
+                .and_then(|p| p.get("name").and_then(|n| n.as_str()))
+                .unwrap_or("");
             if tool_name != "exec_remote" {
                 return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}});
             }
 
             let empty_obj = json!({});
-            let arguments = body.get("params").and_then(|p| p.get("arguments")).unwrap_or(&empty_obj);
+            let arguments = body
+                .get("params")
+                .and_then(|p| p.get("arguments"))
+                .unwrap_or(&empty_obj);
 
             // Token from tool arguments (primary), fallback to query param
-            let token = arguments.get("token").and_then(|v| v.as_str())
+            let token = arguments
+                .get("token")
+                .and_then(|v| v.as_str())
                 .or(url_token.as_deref())
                 .unwrap_or("");
 
             let (session_id, permission) = match state.sessions.authenticate(token).await {
                 Some(r) => r,
-                None => return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32001,"message":"Invalid token"}}),
+                None => {
+                    return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32001,"message":"Invalid token"}})
+                }
             };
 
             if permission == Permission::ReadOnly {
@@ -262,13 +283,27 @@ async fn process_mcp_request(
             };
 
             let (tx, rx) = oneshot::channel();
-            { state.pending_mcp.write().await.insert(mcp_req_id.clone(), (session_id.clone(), tx)); }
+            {
+                state
+                    .pending_mcp
+                    .write()
+                    .await
+                    .insert(mcp_req_id.clone(), (session_id.clone(), tx));
+            }
 
             {
-                let agent_tx_option = { state.agent_broadcast.read().await.get(&session_id).and_then(|cm| cm.agent.clone()) };
+                let agent_tx_option = {
+                    state
+                        .agent_broadcast
+                        .read()
+                        .await
+                        .get(&session_id)
+                        .and_then(|cm| cm.agent.clone())
+                };
                 match agent_tx_option {
                     Some(agent_tx) => {
-                        let _ = agent_tx.send(serde_json::to_string(&proto_msg).unwrap_or_default());
+                        let _ =
+                            agent_tx.send(serde_json::to_string(&proto_msg).unwrap_or_default());
                     }
                     None => {
                         state.pending_mcp.write().await.remove(&mcp_req_id);
@@ -292,7 +327,9 @@ async fn process_mcp_request(
                     if !stderr.is_empty() {
                         text.push_str(&format!("\n[stderr]\n{}", stderr));
                     }
-                    if text.is_empty() { text = format!("Exit code: {}", exit_code); }
+                    if text.is_empty() {
+                        text = format!("Exit code: {}", exit_code);
+                    }
                     json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":text.trim()}]}})
                 }
                 _ => {
@@ -300,7 +337,7 @@ async fn process_mcp_request(
                     json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: Request timed out or agent disconnected"}],"isError":true}})
                 }
             }
-        },
+        }
 
         _ => json!({
             "jsonrpc": "2.0",
@@ -315,12 +352,12 @@ mod tests {
     use super::*;
     use crate::relay::session::SessionRegistry;
     use crate::relay::RateLimiter;
-    use std::sync::Arc;
-    use tokio::sync::{oneshot, RwLock, mpsc};
     use axum::extract::{Query, State};
     use axum::response::IntoResponse;
-    use std::collections::HashMap;
     use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot, RwLock};
 
     fn make_state() -> Arc<SharedState> {
         Arc::new(SharedState {
@@ -337,50 +374,91 @@ mod tests {
         })
     }
 
-    async fn mcp_send_and_recv(state: &Arc<SharedState>, params: HashMap<String, String>, body: Value) -> Value {
+    async fn mcp_send_and_recv(
+        state: &Arc<SharedState>,
+        params: HashMap<String, String>,
+        body: Value,
+    ) -> Value {
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let sid = uuid::Uuid::new_v4().to_string();
         state.sse_sessions.write().await.insert(sid.clone(), tx);
         let mut p = params;
         p.insert("sessionId".into(), sid);
-        let resp = messages_handler(State(state.clone()), axum::http::HeaderMap::new(), Query(p), axum::Json(body)).await.into_response();
+        let resp = messages_handler(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Query(p),
+            axum::Json(body),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
-        let raw = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         serde_json::from_str(&raw).unwrap()
     }
 
     #[tokio::test]
     async fn test_sse_handler_valid_token_returns_200() {
         let state = make_state();
-        let response = sse_handler(State(state), axum::http::HeaderMap::new(), Query(HashMap::new())).await.into_response();
+        let response = sse_handler(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_sse_handler_no_token_returns_200() {
         let state = make_state();
-        let response = sse_handler(State(state), axum::http::HeaderMap::new(), Query(HashMap::new())).await.into_response();
+        let response = sse_handler(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_messages_handler_initialize() {
         let state = make_state();
-        let r = mcp_send_and_recv(&state, HashMap::new(), json!({"jsonrpc":"2.0","id":1,"method":"initialize"})).await;
+        let r = mcp_send_and_recv(
+            &state,
+            HashMap::new(),
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+        )
+        .await;
         assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
     }
 
     #[tokio::test]
     async fn test_messages_handler_tools_list() {
         let state = make_state();
-        let r = mcp_send_and_recv(&state, HashMap::new(), json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
+        let r = mcp_send_and_recv(
+            &state,
+            HashMap::new(),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        )
+        .await;
         assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn test_messages_handler_unknown_method() {
         let state = make_state();
-        let r = mcp_send_and_recv(&state, HashMap::new(), json!({"jsonrpc":"2.0","id":3,"method":"unknown"})).await;
+        let r = mcp_send_and_recv(
+            &state,
+            HashMap::new(),
+            json!({"jsonrpc":"2.0","id":3,"method":"unknown"}),
+        )
+        .await;
         assert_eq!(r["error"]["code"], -32601);
     }
 

@@ -1,12 +1,12 @@
-use clap::{Parser, Subcommand};
 use crate::proto::TokenType;
+use clap::{Parser, Subcommand};
 
 mod agent;
+#[cfg(test)]
+mod integration_test;
 mod proto;
 mod relay;
 mod web;
-#[cfg(test)]
-mod integration_test;
 
 #[derive(Parser)]
 #[command(name = "shell-remote", about = "Collaborative remote shell tool")]
@@ -72,8 +72,7 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 

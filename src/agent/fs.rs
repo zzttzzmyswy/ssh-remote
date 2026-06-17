@@ -27,12 +27,10 @@ pub fn resolve_path(root: &Path, user_path: &str) -> Option<PathBuf> {
     let combined = root.join(user_path.trim_start_matches('/'));
     let resolved = match combined.canonicalize() {
         Ok(r) => r,
-        Err(_) => {
-            match combined.parent().and_then(|p| p.canonicalize().ok()) {
-                Some(_parent) => combined,
-                _ => return None,
-            }
-        }
+        Err(_) => match combined.parent().and_then(|p| p.canonicalize().ok()) {
+            Some(_parent) => combined,
+            _ => return None,
+        },
     };
     Some(resolved)
 }
@@ -223,9 +221,15 @@ pub fn write_file(root: &Path, user_path: &str, content_b64: &str) -> FsResultPa
 pub fn write_file_bytes(root: &Path, user_path: &str, data: &[u8]) -> FsResultPayload {
     let path = match resolve_path(root, user_path) {
         Some(p) => p,
-        None => return FsResultPayload {
-            success: false, error: Some("Invalid path".into()), entries: None,
-            content: None, path: Some(user_path.to_string()), new_path: None,
+        None => {
+            return FsResultPayload {
+                success: false,
+                error: Some("Invalid path".into()),
+                entries: None,
+                content: None,
+                path: Some(user_path.to_string()),
+                new_path: None,
+            }
         }
     };
     if let Some(parent) = path.parent() {
@@ -233,12 +237,20 @@ pub fn write_file_bytes(root: &Path, user_path: &str, data: &[u8]) -> FsResultPa
     }
     match fs::write(&path, data) {
         Ok(()) => FsResultPayload {
-            success: true, error: None, entries: None, content: None,
-            path: Some(user_path.to_string()), new_path: None,
+            success: true,
+            error: None,
+            entries: None,
+            content: None,
+            path: Some(user_path.to_string()),
+            new_path: None,
         },
         Err(e) => FsResultPayload {
-            success: false, error: Some(format!("Failed to write file: {}", e)),
-            entries: None, content: None, path: Some(user_path.to_string()), new_path: None,
+            success: false,
+            error: Some(format!("Failed to write file: {}", e)),
+            entries: None,
+            content: None,
+            path: Some(user_path.to_string()),
+            new_path: None,
         },
     }
 }
@@ -368,11 +380,34 @@ fn get_owner(metadata: &std::fs::Metadata) -> String {
 pub fn create_dir(root: &Path, user_path: &str) -> FsResultPayload {
     let path = match resolve_path(root, user_path) {
         Some(p) => p,
-        None => return FsResultPayload { success: false, error: Some("Invalid path".into()), entries: None, content: None, path: Some(user_path.to_string()), new_path: None },
+        None => {
+            return FsResultPayload {
+                success: false,
+                error: Some("Invalid path".into()),
+                entries: None,
+                content: None,
+                path: Some(user_path.to_string()),
+                new_path: None,
+            }
+        }
     };
     match fs::create_dir_all(&path) {
-        Ok(()) => FsResultPayload { success: true, error: None, entries: None, content: None, path: Some(user_path.to_string()), new_path: None },
-        Err(e) => FsResultPayload { success: false, error: Some(format!("{}", e)), entries: None, content: None, path: Some(user_path.to_string()), new_path: None },
+        Ok(()) => FsResultPayload {
+            success: true,
+            error: None,
+            entries: None,
+            content: None,
+            path: Some(user_path.to_string()),
+            new_path: None,
+        },
+        Err(e) => FsResultPayload {
+            success: false,
+            error: Some(format!("{}", e)),
+            entries: None,
+            content: None,
+            path: Some(user_path.to_string()),
+            new_path: None,
+        },
     }
 }
 

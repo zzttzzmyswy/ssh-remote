@@ -33,10 +33,17 @@ pub fn extract_token_from_query(query: &str) -> Option<String> {
 pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("authorization")?.to_str().ok()?;
     let value = value.strip_prefix("Bearer ")?;
-    if value.is_empty() { None } else { Some(value.to_string()) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
-pub fn extract_token_from_headers_or_query(headers: &HeaderMap, query_token: Option<&String>) -> Option<String> {
+pub fn extract_token_from_headers_or_query(
+    headers: &HeaderMap,
+    query_token: Option<&String>,
+) -> Option<String> {
     extract_bearer_token(headers).or_else(|| query_token.cloned())
 }
 
@@ -46,9 +53,7 @@ fn url_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) =
-                (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
-            {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
                 result.push((hi << 4) | lo);
                 i += 3;
                 continue;

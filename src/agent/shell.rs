@@ -87,9 +87,7 @@ impl Shell {
         self.writer
             .write_all(data)
             .context("Failed to write to pty master")?;
-        self.writer
-            .flush()
-            .context("Failed to flush pty master")?;
+        self.writer.flush().context("Failed to flush pty master")?;
         Ok(())
     }
 

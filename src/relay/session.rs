@@ -76,10 +76,7 @@ impl SessionRegistry {
         (session_id, tokens)
     }
 
-    pub async fn authenticate(
-        &self,
-        token: &str,
-    ) -> Option<(String, Permission)> {
+    pub async fn authenticate(&self, token: &str) -> Option<(String, Permission)> {
         let tmap = self.token_map.read().await;
         tmap.get(token).cloned()
     }
@@ -149,8 +146,9 @@ mod tests {
     #[tokio::test]
     async fn test_register_fixed_key() {
         let registry = SessionRegistry::new();
-        let (_session_id, tokens) =
-            registry.register(Some("my-secret-key".to_string()), "rw").await;
+        let (_session_id, tokens) = registry
+            .register(Some("my-secret-key".to_string()), "rw")
+            .await;
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].0, "my-secret-key");
         assert_eq!(tokens[0].1, Permission::ReadWrite);
@@ -159,8 +157,9 @@ mod tests {
     #[tokio::test]
     async fn test_register_fixed_key_both() {
         let registry = SessionRegistry::new();
-        let (_session_id, tokens) =
-            registry.register(Some("my-secret-key".to_string()), "both").await;
+        let (_session_id, tokens) = registry
+            .register(Some("my-secret-key".to_string()), "both")
+            .await;
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].0, "my-secret-key");
         assert_eq!(tokens[0].1, Permission::ReadWrite);
@@ -209,8 +208,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_temporary_false_for_fixed_key() {
         let registry = SessionRegistry::new();
-        let (session_id, _tokens) =
-            registry.register(Some("key".to_string()), "rw").await;
+        let (session_id, _tokens) = registry.register(Some("key".to_string()), "rw").await;
         assert!(!registry.is_temporary(&session_id).await);
     }
 

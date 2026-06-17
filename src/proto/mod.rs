@@ -203,10 +203,7 @@ mod tests {
         let decoded: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.msg_type, "terminal:input");
         assert_eq!(decoded.session_id, "abc-123");
-        assert_eq!(
-            decoded.payload["data"].as_str().unwrap(),
-            "aGVsbG8="
-        );
+        assert_eq!(decoded.payload["data"].as_str().unwrap(), "aGVsbG8=");
     }
 
     #[test]
@@ -252,8 +249,7 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: Message = serde_json::from_str(&json).unwrap();
-        let decoded_result: FsResultPayload =
-            serde_json::from_value(decoded.payload).unwrap();
+        let decoded_result: FsResultPayload = serde_json::from_value(decoded.payload).unwrap();
         assert!(decoded_result.success);
         assert_eq!(decoded_result.entries.unwrap().len(), 1);
     }
@@ -285,8 +281,7 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: Message = serde_json::from_str(&json).unwrap();
-        let decoded_err: ErrorPayload =
-            serde_json::from_value(decoded.payload).unwrap();
+        let decoded_err: ErrorPayload = serde_json::from_value(decoded.payload).unwrap();
         assert_eq!(decoded_err.code, "AUTH_INVALID_TOKEN");
     }
 
