@@ -123,7 +123,7 @@ use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode, Uri};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use tokio_stream::StreamExt;
 
 async fn static_handler(uri: Uri) -> Response<Body> {
@@ -451,6 +451,30 @@ pub async fn bin_handler(
     Ok((StatusCode::OK, headers, data).into_response())
 }
 
+pub async fn install_script_handler(
+    State(_state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| *v == "https")
+        .map(|_| "https")
+        .unwrap_or("http");
+    let relay_url = format!("{}://{}", proto, host);
+
+    let script = include_str!("../../web/install.sh")
+        .replace("__RELAY_URL__", &relay_url);
+
+    (axum::http::StatusCode::OK,
+     [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+     script)
+}
+
 pub async fn start(
     bind: String,
     _tls_cert: Option<String>,
@@ -500,6 +524,7 @@ pub async fn start(
         .route("/agent/upload", axum::routing::post(upload_handler).layer(axum::extract::DefaultBodyLimit::disable()))
         .route("/agent/mcp/sse", get(mcp::sse_handler))
         .route("/agent/mcp/messages", axum::routing::post(mcp::messages_handler))
+        .route("/agent/install", get(install_script_handler))
         .route("/download", get(static_handler))
         .route("/bin/{arch}", get(bin_handler))
         .route("/", get(static_handler))
