@@ -511,13 +511,17 @@ pub async fn browser_send_handler(
         activity.insert(session_id.clone(), Instant::now());
     }
 
-    let text_str = serde_json::to_string(&body).unwrap_or_default();
+    let forward_msg = json!({
+        "type": msg_type,
+        "session_id": session_id,
+        "payload": body["payload"]
+    }).to_string();
 
     {
         let broadcast = state.agent_broadcast.read().await;
         if let Some(cm) = broadcast.get(&session_id) {
             if let Some(ref agent_tx) = cm.agent {
-                let _ = agent_tx.send(text_str);
+                let _ = agent_tx.send(forward_msg);
             }
         }
     }
