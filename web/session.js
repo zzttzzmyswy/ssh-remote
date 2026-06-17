@@ -1,6 +1,5 @@
 (function() {
     const token = sessionStorage.getItem('shell-remote-token');
-    const permission = sessionStorage.getItem('shell-remote-permission') || 'rw';
 
     if (!token) {
         window.location.href = '/';

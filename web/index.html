@@ -23,8 +23,7 @@
             <label for="token-input">会话密钥</label>
             <input type="text" id="token-input" placeholder="粘贴会话密钥..." autocomplete="off">
             <div class="button-row">
-                <button id="connect-rw" class="btn btn-primary">读写连接</button>
-                <button id="connect-ro" class="btn btn-secondary">只读连接</button>
+                <button id="connect-btn" class="btn btn-primary">连接</button>
             </div>
             <div id="connect-error" class="error-message hidden"></div>
         </div>
@@ -43,20 +42,16 @@
 
     <script>
         // ── Connect logic ──────────────────────────────────────────────
-        const authInput = document.getElementById('auth-input');
         const tokenInput = document.getElementById('token-input');
         const errorDiv = document.getElementById('connect-error');
 
-        function connect(permission) {
-            const serverAuth = authInput.value.trim();
+        function connect() {
             const token = tokenInput.value.trim();
             if (!token) {
                 showError('请输入会话密钥');
                 return;
             }
             sessionStorage.setItem('shell-remote-token', token);
-            sessionStorage.setItem('shell-remote-permission', permission);
-            sessionStorage.setItem('shell-remote-server-auth', serverAuth);
             window.location.href = '/session';
         }
 
@@ -65,11 +60,10 @@
             errorDiv.classList.remove('hidden');
         }
 
-        document.getElementById('connect-rw').addEventListener('click', () => connect('rw'));
-        document.getElementById('connect-ro').addEventListener('click', () => connect('ro'));
+        document.getElementById('connect-btn').addEventListener('click', () => connect());
 
         tokenInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') connect('rw');
+            if (e.key === 'Enter') connect();
         });
 
         const urlParams = new URLSearchParams(window.location.search);
