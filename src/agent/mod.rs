@@ -529,9 +529,14 @@ async fn execute_command(cmd: &str, timeout_ms: u64) -> (String, String, i32) {
     let cmd = cmd.to_string();
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let result = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new("sh")
+        // Use `script` to allocate a PTY so interactive prompts
+        // (e.g. sudo password, gh login) are captured in stdout/stderr
+        // instead of leaking to the agent host terminal via /dev/tty.
+        tokio::process::Command::new("script")
+            .arg("-q")
             .arg("-c")
             .arg(&cmd)
+            .arg("/dev/null")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
