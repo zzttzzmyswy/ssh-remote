@@ -217,12 +217,12 @@ async fn process_mcp_request(
             "result": {
                 "tools": [
                     {
-                        "name": "exec_remote",
-                        "description": "Execute a shell command on the remote target machine. Returns stdout, stderr, and exit code.",
+                        "name": "shell_remote",
+                        "description": "Execute a shell command on the remote target machine via shell_remote. Returns stdout, stderr, and exit code. Authenticate with a shell_remote token (the session token shown when the agent starts).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "token": {"type": "string", "description": "Session token for authentication"},
+                                "token": {"type": "string", "description": "shell_remote token for authentication (session token shown at agent startup)"},
                                 "cmd": {"type": "string", "description": "The shell command to execute on the remote machine"},
                                 "timeout_ms": {"type": "number", "description": "Optional timeout in milliseconds (default 30s)"}
                             },
@@ -238,7 +238,7 @@ async fn process_mcp_request(
                 .get("params")
                 .and_then(|p| p.get("name").and_then(|n| n.as_str()))
                 .unwrap_or("");
-            if tool_name != "exec_remote" {
+            if tool_name != "shell_remote" {
                 return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}});
             }
 
@@ -263,7 +263,7 @@ async fn process_mcp_request(
             };
 
             if permission == Permission::ReadOnly {
-                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call exec_remote"}});
+                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call shell_remote"}});
             }
 
             let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
@@ -447,6 +447,10 @@ mod tests {
         )
         .await;
         assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            r["result"]["tools"][0]["name"], "shell_remote",
+            "tool must be named shell_remote"
+        );
     }
 
     #[tokio::test]
@@ -465,16 +469,16 @@ mod tests {
     async fn test_messages_handler_invalid_token_returns_error() {
         let state = make_state();
         let r = mcp_send_and_recv(&state, HashMap::new(),
-            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"exec_remote","arguments":{"token":"bad","cmd":"echo hello"}}})).await;
+            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"shell_remote","arguments":{"token":"bad","cmd":"echo hello"}}})).await;
         assert_eq!(r["error"]["code"], -32001);
     }
 
     #[tokio::test]
-    async fn test_messages_handler_exec_remote_without_agent() {
+    async fn test_messages_handler_shell_remote_without_agent() {
         let state = make_state();
         let (_sid, tokens) = state.sessions.register(None, "rw").await;
         let r = mcp_send_and_recv(&state, HashMap::new(),
-            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"exec_remote","arguments":{"token":tokens[0].0,"cmd":"echo hello"}}})).await;
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shell_remote","arguments":{"token":tokens[0].0,"cmd":"echo hello"}}})).await;
         assert!(r["result"]["isError"].as_bool().unwrap_or(false));
     }
 }

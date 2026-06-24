@@ -145,11 +145,11 @@ SSE  ← event: message  {JSON-RPC 响应}
 
 符合 MCP SSE Transport 规范。
 
-### 唯一工具：exec_remote
+### 唯一工具：shell_remote
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `token` | string | 是 | Agent 会话 Token |
+| `token` | string | 是 | shell_remote token（Agent 会话 Token） |
 | `cmd` | string | 是 | 要执行的 Shell 命令 |
 | `timeout_ms` | number | 否 | 超时毫秒数（默认 30000，最大 300000） |
 
@@ -159,7 +159,7 @@ SSE  ← event: message  {JSON-RPC 响应}
 {
   "method": "tools/call",
   "params": {
-    "name": "exec_remote",
+    "name": "shell_remote",
     "arguments": {
       "token": "5fe42fc877b0a721...",
       "cmd": "cat /etc/hostname && uname -a"

@@ -120,11 +120,11 @@ Open `http://<relay-ip>:3000`, enter server password and token. Main area: xterm
 
 Protocol flow: `GET /sse` → `endpoint` event → `POST /messages` → `202 Accepted` → SSE `message` response.
 
-### Tool: exec_remote
+### Tool: shell_remote
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `token` | string | Yes | Agent session token |
+| `token` | string | Yes | shell_remote token (agent session token) |
 | `cmd` | string | Yes | Shell command to execute |
 | `timeout_ms` | number | No | Timeout in milliseconds (default 30000, max 300000) |
 
@@ -134,7 +134,7 @@ Example call:
 {
   "method": "tools/call",
   "params": {
-    "name": "exec_remote",
+    "name": "shell_remote",
     "arguments": {
       "token": "5fe42fc877b0a721...",
       "cmd": "cat /etc/hostname && uname -a"
