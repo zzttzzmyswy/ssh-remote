@@ -230,32 +230,12 @@ impl RelayClient {
         anyhow::bail!("Failed to connect after {} retries", max_retries)
     }
 
-    async fn send_raw(&mut self, text: &str) -> anyhow::Result<()> {
-        let body: serde_json::Value =
-            serde_json::from_str(text).context("Failed to parse outgoing message")?;
-        let resp = self
-            .transport
-            .client
-            .post(&self.transport.send_url)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to POST agent message")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!(
-                "Agent POST failed ({}): {}",
-                status,
-                &body[..body.len().min(200)]
-            );
-        }
-        Ok(())
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.transport.client
     }
 
-    pub async fn send(&mut self, msg: &ProtoMessage) -> anyhow::Result<()> {
-        let text = serde_json::to_string(msg).context("Failed to serialize message")?;
-        self.send_raw(&text).await
+    pub(crate) fn send_url(&self) -> &str {
+        &self.transport.send_url
     }
 
     async fn recv_raw(&mut self) -> Option<String> {

@@ -270,11 +270,16 @@ async fn process_mcp_request(
             let timeout_ms = arguments.get("timeout_ms").and_then(|v| v.as_u64());
 
             let mcp_req_id = Uuid::new_v4().to_string();
-            let payload = if let Some(t) = timeout_ms {
-                json!({"cmd":cmd,"timeout_ms":t,"_mcp_request_id":mcp_req_id})
-            } else {
-                json!({"cmd":cmd,"_mcp_request_id":mcp_req_id})
-            };
+            // Default 30s, cap 300s (matches the tool description). Always
+            // forward the effective timeout so the agent kills the command when
+            // the relay gives up — otherwise long commands outlive the MCP
+            // client's own timeout and surface as i/o errors.
+            let timeout_ms_val = timeout_ms.unwrap_or(30_000).min(300_000);
+            let payload = json!({
+                "cmd": cmd,
+                "timeout_ms": timeout_ms_val,
+                "_mcp_request_id": mcp_req_id
+            });
 
             let proto_msg = ProtoMessage {
                 msg_type: "mcp:exec".to_string(),
@@ -312,7 +317,6 @@ async fn process_mcp_request(
                 }
             }
 
-            let timeout_ms_val = timeout_ms.unwrap_or(300_000).min(1_800_000);
             let timeout_dur = std::time::Duration::from_millis(timeout_ms_val);
             match tokio::time::timeout(timeout_dur, rx).await {
                 Ok(Ok(result)) => {

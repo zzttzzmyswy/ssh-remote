@@ -18,6 +18,106 @@ struct TabState {
     output_buf: Vec<u8>,
 }
 
+/// Outbound message handle. The main loop never blocks on HTTP: terminal
+/// output is pushed to a bounded, coalesced channel; control/result messages
+/// are pushed to a bounded channel drained with priority by a background task.
+struct Out {
+    control_tx: tokio::sync::mpsc::Sender<String>,
+    output_tx: tokio::sync::mpsc::Sender<(String, Vec<u8>)>,
+}
+
+impl Out {
+    /// Push a control/result message. Backpressures (rarely) instead of
+    /// dropping — losing an mcp/fs result would break callers.
+    async fn control(&self, msg: Message) {
+        if let Ok(s) = serde_json::to_string(&msg) {
+            let _ = self.control_tx.send(s).await;
+        }
+    }
+
+    /// Push a terminal-output chunk. Non-blocking: under extreme flood we drop
+    /// the chunk rather than stall input/command processing.
+    fn output(&self, tab_id: String, data: Vec<u8>) {
+        let _ = self.output_tx.try_send((tab_id, data));
+    }
+}
+
+/// Background sender: drains control + output channels and POSTs to the relay.
+/// Coalesces terminal:output per tab within a short window so a bursting
+/// `cat kern.log` collapses into a handful of messages instead of thousands.
+async fn sender_loop(
+    client: reqwest::Client,
+    send_url: String,
+    session_id: String,
+    mut control_rx: tokio::sync::mpsc::Receiver<String>,
+    mut output_rx: tokio::sync::mpsc::Receiver<(String, Vec<u8>)>,
+) {
+    let mut pending: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut timer = tokio::time::interval(Duration::from_millis(16));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            ctrl = control_rx.recv() => match ctrl {
+                Some(s) => {
+                    flush_output(&client, &send_url, &session_id, &mut pending).await;
+                    post_raw(&client, &send_url, &s).await;
+                }
+                None => break,
+            },
+            out = output_rx.recv() => match out {
+                Some((tab, data)) => pending.entry(tab).or_default().extend(data),
+                None => break,
+            },
+            _ = timer.tick() => {
+                flush_output(&client, &send_url, &session_id, &mut pending).await;
+            }
+        }
+    }
+    flush_output(&client, &send_url, &session_id, &mut pending).await;
+}
+
+async fn flush_output(
+    client: &reqwest::Client,
+    send_url: &str,
+    session_id: &str,
+    pending: &mut HashMap<String, Vec<u8>>,
+) {
+    for (tab_id, data) in pending.drain() {
+        if data.is_empty() {
+            continue;
+        }
+        let encoded = fs::encode_b64(&data);
+        let msg = Message {
+            msg_type: "terminal:output".to_string(),
+            session_id: session_id.to_string(),
+            payload: serde_json::json!({ "data": encoded, "tab_id": tab_id }),
+        };
+        if let Ok(s) = serde_json::to_string(&msg) {
+            post_raw(client, send_url, &s).await;
+        }
+    }
+}
+
+async fn post_raw(client: &reqwest::Client, send_url: &str, text: &str) {
+    let body = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to parse outgoing message: {}", e);
+            return;
+        }
+    };
+    match client.post(send_url).json(&body).send().await {
+        Ok(resp) if !resp.status().is_success() => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!("Agent POST failed ({}): {}", status, &body[..body.len().min(200)]);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Agent POST send error: {}", e),
+    }
+}
+
 pub async fn start(
     relay_url: String,
     key: Option<String>,
@@ -74,6 +174,25 @@ async fn run_session(
         tracing::info!(session = %client.session_id, permission = %perm, "token: {}", token);
     }
 
+    // Outbound channel + background sender. The main loop must never block on
+    // HTTP — otherwise high-volume terminal output starves input/command
+    // processing (and MCP round-trips time out as "i/o error").
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (output_tx, output_rx) = tokio::sync::mpsc::channel::<(String, Vec<u8>)>(64);
+    let out = Out {
+        control_tx: control_tx.clone(),
+        output_tx,
+    };
+    tokio::spawn(sender_loop(
+        client.http_client().clone(),
+        client.send_url().to_string(),
+        client.session_id.clone(),
+        control_rx,
+        output_rx,
+    ));
+    // Keep a control sender for spawned long-running tasks (e.g. mcp:exec).
+    let task_control_tx = control_tx;
+
     let root_path = PathBuf::from(root);
     if !root_path.is_dir() {
         anyhow::bail!(
@@ -119,21 +238,20 @@ async fn run_session(
         session_id: client.session_id.clone(),
         payload: serde_json::json!({ "tabs": build_tab_infos(&tabs, &active_tab_id) }),
     };
-    let _ = client.send(&tab_msg).await;
+    out.control(tab_msg).await;
 
     let sw_msg = Message {
         msg_type: "session:tab_switched".to_string(),
         session_id: client.session_id.clone(),
         payload: serde_json::json!({ "tab_id": active_tab_id }),
     };
-    let _ = client.send(&sw_msg).await;
+    out.control(sw_msg).await;
 
     loop {
         tokio::select! {
                 shell_output = shell_rx.recv() => {
                     match shell_output {
                         Some((tab_id, data)) => {
-                            let encoded = fs::encode_b64(&data);
                             if let Some(ts) = tabs.get_mut(&tab_id) {
                                 ts.output_buf.extend_from_slice(&data);
                                 if ts.output_buf.len() > 65536 {
@@ -141,18 +259,10 @@ async fn run_session(
                                     ts.output_buf.drain(..excess);
                                 }
                             }
-                            let msg = Message {
-                                msg_type: "terminal:output".to_string(),
-                                session_id: client.session_id.clone(),
-                                payload: serde_json::json!({
-                                    "data": encoded,
-                                    "tab_id": tab_id
-                                }),
-                            };
-                            if client.send(&msg).await.is_err() {
-                                tracing::error!("Failed to send terminal output, disconnecting");
-                                break;
-                            }
+                            // Non-blocking push to the coalescing sender. Never
+                            // stalls the loop — disconnect is detected via the
+                            // relay→agent SSE stream closing (recv below).
+                            out.output(tab_id, data);
                         }
                         None => {
                             tracing::info!("All shells closed, disconnecting");
@@ -173,7 +283,7 @@ async fn run_session(
                                         "message": "Agent is read-only, write-type messages rejected"
                                     }),
                                 };
-                                let _ = client.send(&err_resp).await;
+                                out.control(err_resp).await;
                                 continue;
                             }
 
@@ -223,13 +333,13 @@ async fn run_session(
             session_id: client.session_id.clone(),
             payload: serde_json::json!({ "tabs": build_tab_infos(&tabs, &active_tab_id) }),
         };
-        let _ = client.send(&tab_msg).await;
+        out.control(tab_msg).await;
                                             let sw_msg_inner = Message {
                                                 msg_type: "session:tab_switched".to_string(),
                                                 session_id: client.session_id.clone(),
                                                 payload: serde_json::json!({ "tab_id": active_tab_id }),
                                             };
-                                            let _ = client.send(&sw_msg_inner).await;
+                                            out.control(sw_msg_inner).await;
                                         }
                                         Err(e) => {
                                             tracing::error!("Failed to spawn shell for new tab: {}", e);
@@ -251,14 +361,14 @@ async fn run_session(
             session_id: client.session_id.clone(),
             payload: serde_json::json!({ "tabs": build_tab_infos(&tabs, &active_tab_id) }),
         };
-        let _ = client.send(&tab_msg).await;
+        out.control(tab_msg).await;
 
                                     let sw_msg = Message {
                                         msg_type: "session:tab_switched".to_string(),
                                         session_id: client.session_id.clone(),
                                         payload: serde_json::json!({ "tab_id": active_tab_id }),
                                     };
-                                    let _ = client.send(&sw_msg).await;
+                                    out.control(sw_msg).await;
                                 }
 
                                 "session:tab_switch" => {
@@ -271,7 +381,7 @@ async fn run_session(
                                             session_id: client.session_id.clone(),
                                             payload: serde_json::json!({ "tab_id": tab_id }),
                                         };
-                                        let _ = client.send(&sw_msg).await;
+                                        out.control(sw_msg).await;
 
                                         // Replay buffered output, routed to requesting user only
                                         if let Some(ts) = tabs.get(&active_tab_id) {
@@ -289,7 +399,7 @@ async fn run_session(
                                                     session_id: client.session_id.clone(),
                                                     payload: replay_payload,
                                                 };
-                                                let _ = client.send(&replay_msg).await;
+                                                out.control(replay_msg).await;
                                             }
                                         }
                                     }
@@ -308,7 +418,7 @@ async fn run_session(
                                         map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
                                     }
                                     let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "fs:read" => {
@@ -322,7 +432,7 @@ async fn run_session(
                                         map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
                                     }
                                     let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "fs:write" => {
@@ -337,7 +447,7 @@ async fn run_session(
                                         map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
                                     }
                                     let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "fs:upload" => {
@@ -356,7 +466,7 @@ async fn run_session(
                                         };
                                         let payload = serde_json::to_value(&result).unwrap();
                                         let resp = Message { msg_type: "fs:result".into(), session_id: client.session_id.clone(), payload };
-                                        let _ = client.send(&resp).await;
+                                        out.control(resp).await;
                                         continue;
                                     }
 
@@ -379,12 +489,12 @@ async fn run_session(
                                             map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id.clone()));
                                         }
                                         let resp = Message { msg_type: "fs:result".into(), session_id: client.session_id.clone(), payload };
-                                        let _ = client.send(&resp).await;
+                                        out.control(resp).await;
                                         continue;
                                     }
                                     let payload = serde_json::to_value(&result).unwrap();
                                     let resp = Message { msg_type: "fs:result".into(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "fs:delete" => {
@@ -398,7 +508,7 @@ async fn run_session(
                                         map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
                                     }
                                     let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "fs:rename" => {
@@ -413,7 +523,7 @@ async fn run_session(
                                         map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
                                     }
                                     let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "fs:mkdir" => {
@@ -425,23 +535,29 @@ async fn run_session(
                                         map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
                                     }
                                     let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "mcp:exec" => {
-                                    let cmd = msg.payload["cmd"].as_str().unwrap_or("");
-                                    let timeout_ms = msg.payload["timeout_ms"].as_u64().unwrap_or(300_000);
+                                    let cmd = msg.payload["cmd"].as_str().unwrap_or("").to_string();
+                                    let timeout_ms = msg.payload["timeout_ms"].as_u64().unwrap_or(30_000);
                                     let mcp_request_id = msg.payload["_mcp_request_id"].as_str().map(|s| s.to_string());
-                                    let (stdout, stderr, exit_code) = execute_command(cmd, timeout_ms).await;
-                                    let result = McpResultPayload { stdout, stderr, exit_code };
-                                    let mut payload = serde_json::to_value(&result).unwrap();
-                                    if let (Some(req_id), serde_json::Value::Object(ref mut map)) =
-                                        (mcp_request_id, &mut payload)
-                                    {
-                                        map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
-                                    }
-                                    let resp = Message { msg_type: "mcp:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    let _ = client.send(&resp).await;
+                                    let session_id = client.session_id.clone();
+                                    let ctrl_tx = task_control_tx.clone();
+                                    // Spawn so a long-running command cannot freeze the main loop
+                                    // (which would otherwise starve input and MCP round-trips).
+                                    tokio::spawn(async move {
+                                        let (stdout, stderr, exit_code) = execute_command(&cmd, timeout_ms).await;
+                                        let result = McpResultPayload { stdout, stderr, exit_code };
+                                        let mut payload = serde_json::to_value(&result).unwrap();
+                                        if let (Some(req_id), serde_json::Value::Object(ref mut map)) =
+                                            (mcp_request_id, &mut payload)
+                                        {
+                                            map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
+                                        }
+                                        let resp = Message { msg_type: "mcp:result".to_string(), session_id, payload };
+                                        let _ = ctrl_tx.send(serde_json::to_string(&resp).unwrap_or_default()).await;
+                                    });
                                 }
 
                                 "mcp:exec_start" => {
@@ -450,7 +566,7 @@ async fn run_session(
                                     let mut result = match exec_sessions.spawn(cmd).await { Ok(r) => r, Err(r) => r };
                                     result._mcp_request_id = mcp_request_id;
                                     let resp = Message { msg_type: "mcp:exec_result".to_string(), session_id: client.session_id.clone(), payload: serde_json::to_value(&result).unwrap() };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "mcp:exec_input" => {
@@ -461,7 +577,7 @@ async fn run_session(
                                     let mut result = match exec_sessions.write_stdin(exec_id, &data).await { Ok(r) => r, Err(r) => r };
                                     result._mcp_request_id = mcp_request_id;
                                     let resp = Message { msg_type: "mcp:exec_result".to_string(), session_id: client.session_id.clone(), payload: serde_json::to_value(&result).unwrap() };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "mcp:exec_close" => {
@@ -470,7 +586,7 @@ async fn run_session(
                                     let mut result = match exec_sessions.close(exec_id).await { Ok(r) => r, Err(r) => r };
                                     result._mcp_request_id = mcp_request_id;
                                     let resp = Message { msg_type: "mcp:exec_result".to_string(), session_id: client.session_id.clone(), payload: serde_json::to_value(&result).unwrap() };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "mcp:exec_list" => {
@@ -478,7 +594,7 @@ async fn run_session(
                                     let mut result = exec_sessions.list().await;
                                     result._mcp_request_id = mcp_request_id;
                                     let resp = Message { msg_type: "mcp:exec_result".to_string(), session_id: client.session_id.clone(), payload: serde_json::to_value(&result).unwrap() };
-                                    let _ = client.send(&resp).await;
+                                    out.control(resp).await;
                                 }
 
                                 "session:join" => {
@@ -491,7 +607,7 @@ async fn run_session(
                                         session_id: client.session_id.clone(),
                                         payload: serde_json::json!({ "tabs": build_tab_infos(&tabs, &active_tab_id) }),
                                     };
-                                    let _ = client.send(&tab_msg).await;
+                                    out.control(tab_msg).await;
 
                                     // Replay buffered output AFTER tab_list so JS knows activeTabId
                                     for (tid, ts) in &tabs {
@@ -505,7 +621,7 @@ async fn run_session(
                                                     "tab_id": tid
                                                 }),
                                             };
-                                            let _ = client.send(&replay_msg).await;
+                                            out.control(replay_msg).await;
                                         }
                                     }
 
@@ -514,7 +630,7 @@ async fn run_session(
                                         session_id: client.session_id.clone(),
                                         payload: serde_json::json!({ "tab_id": active_tab_id }),
                                     };
-                                    let _ = client.send(&sw_msg).await;
+                                    out.control(sw_msg).await;
                                 }
 
                                 "session:leave" => {
@@ -600,5 +716,60 @@ async fn execute_command(cmd: &str, timeout_ms: u64) -> (String, String, i32) {
             format!("Command timed out after {}s", timeout_ms / 1000),
             -1,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_output_coalescing_per_tab() {
+        // sender_loop accumulates chunks per tab; a flush emits one message
+        // per tab with the concatenated bytes — collapsing a `cat kern.log`
+        // burst into a handful of POSTs.
+        let mut pending: HashMap<String, Vec<u8>> = HashMap::new();
+        for chunk in [b"a".as_slice(), b"b", b"c"] {
+            pending.entry("tab1".to_string()).or_default().extend(chunk);
+        }
+        pending.entry("tab2".to_string()).or_default().extend(b"xy");
+        let mut drained: HashMap<String, Vec<u8>> =
+            pending.drain().filter(|(_, d)| !d.is_empty()).collect();
+        assert_eq!(drained.remove("tab1").unwrap(), b"abc".to_vec());
+        assert_eq!(drained.remove("tab2").unwrap(), b"xy".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_out_control_delivers_serialized_message() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+        let out = Out {
+            control_tx: tx,
+            output_tx: tokio::sync::mpsc::channel::<(String, Vec<u8>)>(4).0,
+        };
+        let msg = Message {
+            msg_type: "mcp:result".to_string(),
+            session_id: "s1".to_string(),
+            payload: serde_json::json!({"stdout":"hi","exit_code":0}),
+        };
+        out.control(msg).await;
+        let received = rx.recv().await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(v["type"], "mcp:result");
+        assert_eq!(v["payload"]["stdout"], "hi");
+    }
+
+    #[tokio::test]
+    async fn test_out_output_drops_instead_of_blocking() {
+        // Bounded output channel: flooding past capacity drops chunks (try_send
+        // returns Err) rather than stalling the main loop.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<(String, Vec<u8>)>(1);
+        let out = Out {
+            control_tx: tokio::sync::mpsc::channel::<String>(1).0,
+            output_tx: tx,
+        };
+        // Fill + overflow; must return promptly without awaiting.
+        for _ in 0..1000 {
+            out.output("t".to_string(), b"x".to_vec());
+        }
     }
 }

@@ -204,7 +204,7 @@ SSE  ← event: message  {JSON-RPC 响应}
 
 ```bash
 cargo test
-# 106 passed; 0 failed (含集成测试)
+# 114 passed; 0 failed (含集成测试)
 ```
 
 ## 许可证
