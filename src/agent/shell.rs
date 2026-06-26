@@ -36,7 +36,8 @@ impl Shell {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("LANG", "en_US.UTF-8");
 
-        if let Ok(home) = std::env::var("HOME") {
+        let home = crate::agent::home_dir();
+        if home != "." {
             cmd.cwd(&home);
         }
 
@@ -117,17 +118,22 @@ impl Drop for Shell {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const TEST_SHELL: &str = "/bin/sh";
+    #[cfg(not(unix))]
+    const TEST_SHELL: &str = "cmd.exe";
+
     #[test]
     fn test_shell_spawn() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let shell = Shell::spawn(80, 24, "/bin/sh", "test-tab", tx);
+        let shell = Shell::spawn(80, 24, TEST_SHELL, "test-tab", tx);
         assert!(shell.is_ok());
     }
 
     #[test]
     fn test_shell_write_input() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut shell = Shell::spawn(80, 24, "/bin/sh", "test-tab", tx).unwrap();
+        let mut shell = Shell::spawn(80, 24, TEST_SHELL, "test-tab", tx).unwrap();
         let result = shell.write_input(b"echo hello\n");
         assert!(result.is_ok());
     }
@@ -135,7 +141,7 @@ mod tests {
     #[test]
     fn test_shell_resize() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut shell = Shell::spawn(80, 24, "/bin/sh", "test-tab", tx).unwrap();
+        let mut shell = Shell::spawn(80, 24, TEST_SHELL, "test-tab", tx).unwrap();
         let result = shell.resize(120, 40);
         assert!(result.is_ok());
         assert_eq!(shell.cols, 120);
