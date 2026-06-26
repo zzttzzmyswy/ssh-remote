@@ -372,16 +372,15 @@ pub fn decode_b64(encoded: &str) -> Option<Vec<u8>> {
     BASE64.decode(encoded).ok()
 }
 
+#[cfg(unix)]
 fn get_owner(metadata: &std::fs::Metadata) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", metadata.uid(), metadata.gid())
-    }
-    #[cfg(not(unix))]
-    {
-        "0:0".to_string()
-    }
+    use std::os::unix::fs::MetadataExt;
+    format!("{}:{}", metadata.uid(), metadata.gid())
+}
+
+#[cfg(not(unix))]
+fn get_owner(_metadata: &std::fs::Metadata) -> String {
+    "0:0".to_string()
 }
 
 pub fn create_dir(root: &Path, user_path: &str) -> FsResultPayload {
