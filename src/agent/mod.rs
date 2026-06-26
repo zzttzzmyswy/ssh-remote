@@ -555,10 +555,11 @@ async fn run_session(
                                     let mcp_request_id = msg.payload["_mcp_request_id"].as_str().map(|s| s.to_string());
                                     let session_id = client.session_id.clone();
                                     let ctrl_tx = task_control_tx.clone();
+                                    let shell = shell_path.to_string();
                                     // Spawn so a long-running command cannot freeze the main loop
                                     // (which would otherwise starve input and MCP round-trips).
                                     tokio::spawn(async move {
-                                        let (stdout, stderr, exit_code) = execute_command(&cmd, timeout_ms).await;
+                                        let (stdout, stderr, exit_code) = execute_command(&cmd, timeout_ms, &shell).await;
                                         let result = McpResultPayload { stdout, stderr, exit_code };
                                         let mut payload = serde_json::to_value(&result).unwrap();
                                         if let (Some(req_id), serde_json::Value::Object(ref mut map)) =
@@ -670,7 +671,8 @@ async fn run_session(
     Ok(Some(client.tokens.clone()))
 }
 
-async fn execute_command(cmd: &str, timeout_ms: u64) -> (String, String, i32) {
+#[cfg(unix)]
+async fn execute_command(cmd: &str, timeout_ms: u64, _shell: &str) -> (String, String, i32) {
     let cmd = cmd.to_string();
     let timeout = std::time::Duration::from_millis(timeout_ms);
 
@@ -709,6 +711,47 @@ async fn execute_command(cmd: &str, timeout_ms: u64) -> (String, String, i32) {
     };
 
     let result = tokio::time::timeout(timeout, output).await;
+
+    match result {
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1);
+            (stdout, stderr, exit_code)
+        }
+        Ok(Err(e)) => (
+            String::new(),
+            format!("Failed to execute command: {}", e),
+            -1,
+        ),
+        Err(_) => (
+            String::new(),
+            format!("Command timed out after {}s", timeout_ms / 1000),
+            -1,
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+async fn execute_command(cmd: &str, timeout_ms: u64, shell: &str) -> (String, String, i32) {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let lower = shell.to_ascii_lowercase();
+    let mut command = if lower.contains("powershell") || lower.contains("pwsh") {
+        let mut c = tokio::process::Command::new(shell);
+        c.arg("-NoProfile").arg("-Command").arg(cmd);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("cmd.exe");
+        c.arg("/c").arg(cmd);
+        c
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let result = tokio::time::timeout(timeout, command.output()).await;
 
     match result {
         Ok(Ok(out)) => {
