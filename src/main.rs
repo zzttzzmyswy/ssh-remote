@@ -38,15 +38,20 @@ enum Command {
         #[arg(long)]
         key: Option<String>,
 
-        /// Default directory for file manager (defaults to $HOME)
-        #[arg(long, env = "HOME")]
-        root: String,
+        /// Default directory for file manager (defaults to $HOME / %USERPROFILE%)
+        #[arg(long)]
+        root: Option<String>,
 
         /// Token type: rw, ro, or both
         #[arg(long, default_value = "rw")]
         token_type: TokenType,
 
+        /// Shell path (e.g., /bin/bash, powershell.exe)
+        #[cfg(windows)]
+        #[arg(long, env = "SHELL", default_value = "cmd.exe")]
+        shell: String,
         /// Shell path (e.g., /bin/bash, /usr/bin/zsh)
+        #[cfg(not(windows))]
         #[arg(long, env = "SHELL", default_value = "/bin/bash")]
         shell: String,
     },
@@ -76,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
             token_type,
             shell,
         } => {
+            let root = root.unwrap_or_else(agent::home_dir);
             agent::start(relay_url, key, root, token_type.as_str().to_string(), shell).await?;
         }
     }
