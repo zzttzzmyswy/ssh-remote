@@ -4,6 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::proto::{FileEntry, FsResultPayload};
 
+/// Strips leading path separators (`/` and `\`) so a user-supplied path can
+/// be joined onto the file-manager root on both unix and Windows.
+fn strip_leading_seps(s: &str) -> &str {
+    s.trim_start_matches(|c| c == '/' || c == '\\')
+}
+
 pub fn resolve_path(root: &Path, user_path: &str) -> Option<PathBuf> {
     let root = match root.canonicalize() {
         Ok(r) => r,
@@ -24,7 +30,7 @@ pub fn resolve_path(root: &Path, user_path: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let combined = root.join(user_path.trim_start_matches('/'));
+    let combined = root.join(strip_leading_seps(user_path));
     let resolved = match combined.canonicalize() {
         Ok(r) => r,
         Err(_) => match combined.parent().and_then(|p| p.canonicalize().ok()) {
@@ -674,5 +680,17 @@ mod tests {
         let dir_metadata = dir.path().metadata().unwrap();
         let dir_mode = format_mode(&dir_metadata);
         assert!(dir_mode.starts_with('d'));
+    }
+
+    #[test]
+    fn test_strip_leading_seps_unix() {
+        assert_eq!(strip_leading_seps("/sub/dir"), "sub/dir");
+        assert_eq!(strip_leading_seps("sub/dir"), "sub/dir");
+    }
+
+    #[test]
+    fn test_strip_leading_seps_windows() {
+        assert_eq!(strip_leading_seps("\\sub\\dir"), "sub\\dir");
+        assert_eq!(strip_leading_seps("/\\mixed"), "mixed");
     }
 }
