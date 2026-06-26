@@ -12,3 +12,7 @@ linker = "rust-lld"
 
 [target.i686-unknown-linux-musl]
 linker = "rust-lld"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
