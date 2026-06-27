@@ -269,7 +269,7 @@ Token is passed in arguments, not in URL or headers. Commands execute via `sh -c
 
 ```bash
 cargo test
-# 150 passed; 0 failed (including integration test)
+# 151 passed; 0 failed (including integration test)
 ```
 
 ## License

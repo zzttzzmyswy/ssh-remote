@@ -10,6 +10,20 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
+/// Decode a terminal:output / terminal:input `payload.data` field into the raw
+/// terminal bytes (as a lossy UTF-8 string for the cast file). Both the agent
+/// (output) and the browser (input) base64-encode terminal data, so the cast
+/// must decode it back or replays would show base64 gibberish. Falls back to
+/// the raw string if it isn't valid base64.
+pub fn decode_terminal_data(s: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    B64
+        .decode(s)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_else(|| s.to_string())
+}
+
 /// One terminal event to append to a session's cast file.
 #[derive(Debug, Clone)]
 pub enum RecordEvent {
@@ -249,5 +263,15 @@ mod tests {
         assert!(rec.is_recording("s3"));
         rec.close("s3");
         assert!(!rec.is_recording("s3"));
+    }
+
+    #[test]
+    fn test_decode_terminal_data_base64() {
+        // "hello\n" base64
+        assert_eq!(decode_terminal_data("aGVsbG8K"), "hello\n");
+        // invalid base64 (hyphen) falls back to raw
+        assert_eq!(decode_terminal_data("hello-world"), "hello-world");
+        // empty
+        assert_eq!(decode_terminal_data(""), "");
     }
 }

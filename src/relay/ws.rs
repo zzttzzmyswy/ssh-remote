@@ -24,7 +24,7 @@ pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, tex
                 if let Some(data) = proto_msg.payload.get("data").and_then(|v| v.as_str()) {
                     rec.record(
                         session_id,
-                        crate::relay::recorder::RecordEvent::Output(data.to_string()),
+                        crate::relay::recorder::RecordEvent::Output(crate::relay::recorder::decode_terminal_data(data)),
                     );
                 }
             }
@@ -606,7 +606,7 @@ pub async fn browser_send_handler(
             if let Some(data) = body["payload"]["data"].as_str() {
                 rec.record(
                     &session_id,
-                    crate::relay::recorder::RecordEvent::Input(data.to_string()),
+                    crate::relay::recorder::RecordEvent::Input(crate::relay::recorder::decode_terminal_data(data)),
                 );
             }
         }
