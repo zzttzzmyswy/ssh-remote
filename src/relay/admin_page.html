@@ -100,6 +100,10 @@
   .tag-add-btn { background: transparent; border: 1px dashed var(--border); color: var(--muted); border-radius: 999px; padding: 2px 9px; font-size: 11px; cursor: pointer; }
   .tag-add-btn:hover { color: var(--accent); border-color: var(--accent); }
 
+  .rec-badge { background: rgba(237,87,87,.16); border: 1px solid var(--red); color: var(--red); border-radius: 4px; padding: 3px 8px; font-size: 11px; font-weight: 600; letter-spacing: .04em; margin-right: 10px; }
+  .rec-badge::before { content: "● "; }
+  .row-rec { font-size: 10px; color: var(--red); font-weight: 600; margin-left: 6px; }
+
   .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   .filter-bar .filter-label { color: var(--muted); font-size: 12px; }
   .filter-chip { background: var(--bg); border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
@@ -138,6 +142,7 @@
     <h1 data-i18n="app_title">shell-remote admin</h1>
     <span class="badge badge-version" id="verBadge">v?</span>
     <span class="badge" id="upBadge">uptime —</span>
+    <span id="recBadge" class="rec-badge hidden" data-i18n="recording">Recording</span>
     <span class="spacer"></span>
     <button class="btn" id="logoutBtn" data-i18n="logout">Logout</button>
   </div>
@@ -217,6 +222,10 @@
       th_tags: "标签",
       th_actions: "操作",
       no_sessions: "暂无会话。",
+      connect: "连接",
+      connect_ro: "连接(只读)",
+      no_token: "无令牌",
+      recording: "录制中",
       online: "在线",
       offline: "离线",
       type_temporary: "临时",
@@ -283,6 +292,10 @@
       th_tags: "Tags",
       th_actions: "Actions",
       no_sessions: "No sessions.",
+      connect: "Connect",
+      connect_ro: "Connect (ro)",
+      no_token: "no token",
+      recording: "Recording",
       online: "online",
       offline: "offline",
       type_temporary: "temporary",
@@ -482,6 +495,7 @@
 
     $('verBadge').textContent = 'v' + (o.version ?? '?');
     $('upBadge').textContent = t('uptime_prefix') + fmtUptime(o.uptime_seconds);
+    $('recBadge').classList.toggle('hidden', !o.recording_enabled);
   }
 
   // --- Filter-by-tag bar ---
@@ -545,6 +559,10 @@
     const tdId = document.createElement('td');
     const idEl = document.createElement('span'); idEl.className = 'mono'; idEl.textContent = s.session_id || '';
     tdId.appendChild(idEl);
+    if (s.recording) {
+      const rec = document.createElement('span'); rec.className = 'row-rec'; rec.textContent = '●REC';
+      tdId.appendChild(rec);
+    }
     tr.appendChild(tdId);
 
     // Status
@@ -588,7 +606,23 @@
 
     // Actions
     const tdA = document.createElement('td'); tdA.className = 'actions';
+    const toks = s.tokens || [];
+    const connectToken = (toks.find(tk => tk.permission === 'rw') || toks[0] || null);
+    const conn = document.createElement('button'); conn.className = 'btn btn-sm btn-primary';
+    if (connectToken) {
+      const isRo = !toks.find(tk => tk.permission === 'rw');
+      conn.textContent = isRo ? t('connect_ro') : t('connect');
+      conn.title = t('connect');
+      conn.addEventListener('click', () => {
+        window.open('/?token=' + encodeURIComponent(connectToken.token), '_blank');
+      });
+    } else {
+      conn.textContent = t('no_token');
+      conn.disabled = true;
+    }
+    tdA.appendChild(conn);
     const regen = document.createElement('button'); regen.className = 'btn btn-sm'; regen.textContent = t('regenerate');
+    regen.style.marginLeft = '6px';
     regen.addEventListener('click', () => onRegenerate(s));
     const kick = document.createElement('button'); kick.className = 'btn btn-sm btn-red'; kick.textContent = t('kick');
     kick.style.marginLeft = '6px';
