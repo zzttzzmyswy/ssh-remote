@@ -18,6 +18,17 @@ use crate::relay::{ChannelMap, SharedState, MAX_SESSIONS};
 
 pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, text_str: &str) {
     if let Ok(proto_msg) = serde_json::from_str::<ProtoMessage>(text_str) {
+        // Recording: capture terminal:output for the session's cast file.
+        if proto_msg.msg_type == "terminal:output" {
+            if let Some(rec) = &state.recorder {
+                if let Some(data) = proto_msg.payload.get("data").and_then(|v| v.as_str()) {
+                    rec.record(
+                        session_id,
+                        crate::relay::recorder::RecordEvent::Output(data.to_string()),
+                    );
+                }
+            }
+        }
         let broadcast_types = [
             "session:users",
             "session:tab_list",
@@ -583,6 +594,18 @@ pub async fn browser_send_handler(
             .into_response();
     }
 
+    // Recording: capture terminal:input for the session's cast file.
+    if msg_type == "terminal:input" {
+        if let Some(rec) = &state.recorder {
+            if let Some(data) = body["payload"]["data"].as_str() {
+                rec.record(
+                    &session_id,
+                    crate::relay::recorder::RecordEvent::Input(data.to_string()),
+                );
+            }
+        }
+    }
+
     {
         let mut activity = state.last_activity.write().await;
         activity.insert(session_id.clone(), Instant::now());
@@ -859,5 +882,61 @@ mod tests {
             .await
             .into_response();
         assert_eq!(resp.status(), 403);
+    }
+
+    fn make_state_with_recorder() -> (
+        Arc<SharedState>,
+        std::sync::Arc<crate::relay::recorder::Recorder>,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "sr-rec-ws-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rec = std::sync::Arc::new(crate::relay::recorder::Recorder::new(dir));
+        let state = Arc::new(SharedState::new(
+            "".to_string(),
+            100 * 1024 * 1024,
+            None,
+            String::new(),
+            String::new(),
+            Some(rec.clone()),
+        ));
+        (state, rec)
+    }
+
+    #[tokio::test]
+    async fn test_route_agent_message_records_output() {
+        let (state, recorder) = make_state_with_recorder();
+        insert_channel_map(&state, "sid1").await;
+        let mut rx = add_browser(&state, "sid1", "u1").await;
+        let msg = json!({"type":"terminal:output","session_id":"sid1","payload":{"data":"hi"}}).to_string();
+        route_agent_message(&state, "sid1", &msg).await;
+        // browser still received it
+        assert!(rx.try_recv().is_ok());
+        // recorder has an open writer
+        assert!(recorder.is_recording("sid1"));
+        recorder.close("sid1");
+    }
+
+    #[tokio::test]
+    async fn test_browser_send_records_input() {
+        let (state, recorder) = make_state_with_recorder();
+        let (sid, tokens) = state.sessions.register(None, "rw", None).await.unwrap();
+        state
+            .agent_broadcast
+            .write()
+            .await
+            .insert(sid.clone(), ChannelMap::new());
+        let body = json!({"token": tokens[0].0, "type": "terminal:input", "payload": {"data": "ls"}});
+        let resp = browser_send_handler(State(state), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), 202);
+        assert!(recorder.is_recording(&sid));
+        recorder.close(&sid);
     }
 }
