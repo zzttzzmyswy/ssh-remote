@@ -478,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn test_messages_handler_shell_remote_without_agent() {
         let state = make_state();
-        let (_sid, tokens) = state.sessions.register(None, "rw").await;
+        let (_sid, tokens) = state.sessions.register(None, "rw", None).await.unwrap();
         let r = mcp_send_and_recv(&state, HashMap::new(),
             json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shell_remote","arguments":{"token":tokens[0].0,"cmd":"echo hello"}}})).await;
         assert!(r["result"]["isError"].as_bool().unwrap_or(false));

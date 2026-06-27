@@ -324,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn test_upload_handler_readonly_token_forbidden() {
         let state = Arc::new(SharedState::new("".into(), 100 * 1024 * 1024, None, String::new(), String::new()));
-        let (_sid, tokens) = state.sessions.register(None, "ro").await;
+        let (_sid, tokens) = state.sessions.register(None, "ro", None).await.unwrap();
         let token = &tokens[0].0;
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -408,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn test_upload_handler_missing_path() {
         let state = Arc::new(SharedState::new("".into(), 100 * 1024 * 1024, None, String::new(), String::new()));
-        let (_sid, tokens) = state.sessions.register(None, "rw").await;
+        let (_sid, tokens) = state.sessions.register(None, "rw", None).await.unwrap();
         let token = &tokens[0].0;
         let mut headers = HeaderMap::new();
         headers.insert(

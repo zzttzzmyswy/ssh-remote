@@ -453,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn test_overview_returns_sessions() {
         let state = state_with_admin("admin", "s3cret");
-        let (sid, _t) = state.sessions.register(None, "rw").await;
+        let (sid, _t) = state.sessions.register(None, "rw", None).await.unwrap();
         state.admin_sessions.write().await.insert(
             "tok".to_string(),
             Instant::now() + ADMIN_SESSION_TTL,
@@ -473,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn test_kick_removes_session() {
         let state = state_with_admin("admin", "s3cret");
-        let (sid, tokens) = state.sessions.register(None, "rw").await;
+        let (sid, tokens) = state.sessions.register(None, "rw", None).await.unwrap();
         state.admin_sessions.write().await.insert(
             "tok".to_string(),
             Instant::now() + ADMIN_SESSION_TTL,
@@ -488,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn test_revoke_and_regenerate_and_perm() {
         let state = state_with_admin("admin", "s3cret");
-        let (sid, tokens) = state.sessions.register(None, "both").await;
+        let (sid, tokens) = state.sessions.register(None, "both", None).await.unwrap();
         state.admin_sessions.write().await.insert(
             "tok".to_string(),
             Instant::now() + ADMIN_SESSION_TTL,

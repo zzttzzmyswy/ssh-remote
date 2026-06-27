@@ -152,8 +152,8 @@ pub async fn agent_send_handler(
                 Some(v)
             });
 
-        let (session_id, tokens) = if let Some(ct) = cached_tokens {
-            state.sessions.register_existing(ct).await
+        let register_result = if let Some(ct) = cached_tokens {
+            state.sessions.register_existing(ct, None).await
         } else {
             let fixed_key = body["key"].as_str().map(|s| s.to_string());
             let token_type_str = body["token_type"].as_str().unwrap_or("rw");
@@ -161,8 +161,27 @@ pub async fn agent_send_handler(
                 .unwrap_or(crate::proto::TokenType::Rw);
             state
                 .sessions
-                .register(fixed_key.clone(), token_type.as_str())
+                .register(fixed_key.clone(), token_type.as_str(), None)
                 .await
+        };
+        // desired_id is None here in Task 2; custom-id extraction is added in
+        // Task 8. None can never yield IdTaken/InvalidId, but map defensively.
+        let (session_id, tokens) = match register_result {
+            Ok(v) => v,
+            Err(crate::relay::session::RegisterError::IdTaken) => {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    "session_id already in use",
+                )
+                    .into_response();
+            }
+            Err(crate::relay::session::RegisterError::InvalidId) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid session_id (5-20 alphanumeric)",
+                )
+                    .into_response();
+            }
         };
 
         let tokens_json: Vec<Value> = tokens
@@ -834,7 +853,7 @@ mod tests {
     #[tokio::test]
     async fn test_browser_send_readonly_write_forbidden() {
         let state = make_state("");
-        let (sid, tokens) = state.sessions.register(None, "ro").await;
+        let (sid, tokens) = state.sessions.register(None, "ro", None).await.unwrap();
         let token = &tokens[0].0;
         state
             .agent_broadcast
