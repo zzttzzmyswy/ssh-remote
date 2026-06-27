@@ -163,8 +163,16 @@ pub async fn agent_send_handler(
                 Some(v)
             });
 
+        // Custom session id (--session-id on the agent). Validated by the
+        // registry too; an empty/absent value means "relay picks a random id".
+        let desired_session_id = body
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         let register_result = if let Some(ct) = cached_tokens {
-            state.sessions.register_existing(ct, None).await
+            state.sessions.register_existing(ct, desired_session_id).await
         } else {
             let fixed_key = body["key"].as_str().map(|s| s.to_string());
             let token_type_str = body["token_type"].as_str().unwrap_or("rw");
@@ -172,11 +180,9 @@ pub async fn agent_send_handler(
                 .unwrap_or(crate::proto::TokenType::Rw);
             state
                 .sessions
-                .register(fixed_key.clone(), token_type.as_str(), None)
+                .register(fixed_key.clone(), token_type.as_str(), desired_session_id)
                 .await
         };
-        // desired_id is None here in Task 2; custom-id extraction is added in
-        // Task 8. None can never yield IdTaken/InvalidId, but map defensively.
         let (session_id, tokens) = match register_result {
             Ok(v) => v,
             Err(crate::relay::session::RegisterError::IdTaken) => {
@@ -882,6 +888,45 @@ mod tests {
             .await
             .into_response();
         assert_eq!(resp.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn test_agent_send_register_with_custom_id() {
+        let state = make_state("");
+        let body = json!({"type":"agent:register","token_type":"rw","session_id":"mydev01"});
+        let resp = agent_send_handler(State(state.clone()), axum::http::HeaderMap::new(), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), 200);
+        let v: Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(v["session_id"], "mydev01");
+    }
+
+    #[tokio::test]
+    async fn test_agent_send_register_custom_id_conflict() {
+        let state = make_state("");
+        let b1 = json!({"type":"agent:register","token_type":"rw","session_id":"mydev02"});
+        let r1 = agent_send_handler(State(state.clone()), axum::http::HeaderMap::new(), Json(b1))
+            .await
+            .into_response();
+        assert_eq!(r1.status(), 200);
+        let b2 = json!({"type":"agent:register","token_type":"rw","session_id":"mydev02"});
+        let r2 = agent_send_handler(State(state.clone()), axum::http::HeaderMap::new(), Json(b2))
+            .await
+            .into_response();
+        assert_eq!(r2.status(), 409);
+    }
+
+    #[tokio::test]
+    async fn test_agent_send_register_invalid_custom_id() {
+        let state = make_state("");
+        let body = json!({"type":"agent:register","token_type":"rw","session_id":"ab!"});
+        let resp = agent_send_handler(State(state), axum::http::HeaderMap::new(), Json(body))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), 400);
     }
 
     fn make_state_with_recorder() -> (
