@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod session;
 pub mod ws;
 pub mod admin;
+pub mod recorder;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
