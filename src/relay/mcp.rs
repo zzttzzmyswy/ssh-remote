@@ -86,10 +86,6 @@ pub async fn sse_handler(
             .event("endpoint")
             .data(format!("/agent/mcp/messages?sessionId={}", sid_for_stream)));
 
-        yield Ok::<_, Infallible>(Event::default()
-            .event("connected")
-            .data("{}"));
-
         let rx_stream = SseCleanup {
             inner: UnboundedReceiverStream::new(rx),
             state: state.clone(),
@@ -181,9 +177,10 @@ pub async fn messages_handler(
     let url_token = params.get("token").cloned();
 
     tokio::spawn(async move {
-        let result = process_mcp_request(&state_clone, url_token, &body_clone).await;
-        let response_text = serde_json::to_string(&result).unwrap_or_default();
-        let _ = sse_tx.send(response_text);
+        if let Some(result) = process_mcp_request(&state_clone, url_token, &body_clone).await {
+            let response_text = serde_json::to_string(&result).unwrap_or_default();
+            let _ = sse_tx.send(response_text);
+        }
     });
 
     (axum::http::StatusCode::ACCEPTED, "").into_response()
@@ -193,11 +190,20 @@ async fn process_mcp_request(
     state: &Arc<SharedState>,
     url_token: Option<String>,
     body: &Value,
-) -> Value {
+) -> Option<Value> {
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    let request_id = body.get("id").cloned().unwrap_or(Value::Null);
 
-    match method {
+    // Per JSON-RPC 2.0, a request without an `id` is a notification and the
+    // server MUST NOT respond. MCP clients send `notifications/initialized`
+    // (and other notifications) here; responding with an error would force
+    // `id: null`, which the MCP Python SDK's pydantic model (id: int|str)
+    // rejects. Drop notifications silently instead.
+    let request_id = match body.get("id").cloned() {
+        Some(id) => id,
+        None => return None,
+    };
+
+    Some(match method {
         "initialize" => json!({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -241,7 +247,7 @@ async fn process_mcp_request(
                 .and_then(|p| p.get("name").and_then(|n| n.as_str()))
                 .unwrap_or("");
             if tool_name != "shell_remote" {
-                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}});
+                return Some(json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":format!("Unknown tool: {}",tool_name)}}));
             }
 
             let empty_obj = json!({});
@@ -260,12 +266,12 @@ async fn process_mcp_request(
             let (session_id, permission) = match state.sessions.authenticate(token).await {
                 Some(r) => r,
                 None => {
-                    return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32001,"message":"Invalid token"}})
+                    return Some(json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32001,"message":"Invalid token"}}))
                 }
             };
 
             if permission == Permission::ReadOnly {
-                return json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call shell_remote"}});
+                return Some(json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32002,"message":"Read-only token cannot call shell_remote"}}));
             }
 
             let cmd = arguments.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
@@ -314,7 +320,7 @@ async fn process_mcp_request(
                     }
                     None => {
                         state.pending_mcp.write().await.remove(&mcp_req_id);
-                        return json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: No agent connected for this session"}],"isError":true}});
+                        return Some(json!({"jsonrpc":"2.0","id":request_id,"result":{"content":[{"type":"text","text":"Error: No agent connected for this session"}],"isError":true}}));
                     }
                 }
             }
@@ -350,7 +356,7 @@ async fn process_mcp_request(
             "id": request_id,
             "error": {"code": -32601, "message": format!("Unknown method: {}", method)}
         }),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -476,5 +482,46 @@ mod tests {
         let r = mcp_send_and_recv(&state, HashMap::new(),
             json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shell_remote","arguments":{"token":tokens[0].0,"cmd":"echo hello"}}})).await;
         assert!(r["result"]["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn test_notifications_get_no_response() {
+        // JSON-RPC notifications (no `id`) must not produce an SSE message.
+        // The MCP client sends notifications/initialized after initialize;
+        // responding would force id:null which the SDK rejects.
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let sid = uuid::Uuid::new_v4().to_string();
+        state.sse_sessions.write().await.insert(sid.clone(), tx);
+
+        let mut params = HashMap::new();
+        params.insert("sessionId".into(), sid);
+        let resp = messages_handler(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Query(params),
+            axum::Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+
+        // Give the spawned task time to (not) send. No message should arrive.
+        let got = tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await;
+        assert!(got.is_err(), "notification must not produce a response");
+    }
+
+    #[tokio::test]
+    async fn test_unknown_method_echoes_request_id() {
+        // Errors for real requests (with id) must echo that id, never null.
+        let state = make_state();
+        let r = mcp_send_and_recv(
+            &state,
+            HashMap::new(),
+            json!({"jsonrpc":"2.0","id":"req-42","method":"nope"}),
+        )
+        .await;
+        assert_eq!(r["error"]["code"], -32601);
+        assert_eq!(r["id"], "req-42");
     }
 }
