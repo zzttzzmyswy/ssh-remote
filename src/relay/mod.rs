@@ -15,9 +15,16 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 #[allow(dead_code)]
 use crate::relay::session::SessionRegistry;
 
+/// Capacity for the per-session (relay→agent) and per-browser (relay→browser)
+/// SSE channels. Bounded so a slow/stuck consumer can't grow the queue without
+/// limit and exhaust relay memory; senders use `try_send` and drop on overflow
+/// (see `crate::relay::ws::deliver`). 256 × a ≤341KB file chunk ≈ 87MB worst
+/// case for one stuck session — bounded, and isolated from other sessions.
+pub const SSE_CHANNEL_CAPACITY: usize = 256;
+
 #[allow(dead_code)]
 pub struct ChannelMap {
-    pub agent: Option<mpsc::UnboundedSender<String>>,
+    pub agent: Option<mpsc::Sender<String>>,
     pub browser_sessions: HashMap<String, String>,
 }
 
@@ -43,7 +50,7 @@ pub struct SharedState {
     pub agent_event_buffers: RwLock<HashMap<String, EventBuffer>>,
     pub rate_limiter: RwLock<RateLimiter>,
     pub max_upload_size: u64,
-    pub sse_sessions: RwLock<HashMap<String, mpsc::UnboundedSender<String>>>,
+    pub sse_sessions: RwLock<HashMap<String, mpsc::Sender<String>>>,
     /// Admin panel config. `admin_path` is `None` when `--admin-path` is
     /// unset, in which case no admin routes are registered.
     pub admin_path: Option<String>,
@@ -85,6 +92,13 @@ impl RateLimiter {
 
 const MAX_EVENT_BUFFER: usize = 1000;
 
+/// Hard cap on the total bytes held in one session's EventBuffer. The count
+/// cap (MAX_EVENT_BUFFER) bounds the number of replay entries; this bounds
+/// their combined size so a few large messages (or a sustained log flood)
+/// can't blow up relay memory and starve every other session. Oldest entries
+/// are evicted once either cap is exceeded.
+const MAX_EVENT_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
 /// Hard cap on the total number of concurrent sessions a relay will accept.
 /// Guards against unauthenticated `agent:register` flooding the registry and
 /// event buffers with unlimited sessions.
@@ -94,6 +108,7 @@ pub const MAX_SESSIONS: usize = 1000;
 pub struct EventBuffer {
     next_id: u64,
     events: VecDeque<(u64, String)>,
+    total_bytes: usize,
 }
 
 impl EventBuffer {
@@ -101,15 +116,27 @@ impl EventBuffer {
         Self {
             next_id: 0,
             events: VecDeque::new(),
+            total_bytes: 0,
         }
     }
 
     pub fn push(&mut self, msg: String) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
+        let len = msg.len();
+        self.total_bytes += len;
         self.events.push_back((id, msg));
-        if self.events.len() > MAX_EVENT_BUFFER {
-            self.events.pop_front();
+        // Evict oldest while either cap is exceeded. Evicting on bytes also
+        // drops the count, so the byte cap is the effective bound for large
+        // messages; the count cap handles many tiny ones.
+        while self.total_bytes > MAX_EVENT_BUFFER_BYTES && self.events.len() > 1
+            || self.events.len() > MAX_EVENT_BUFFER
+        {
+            if let Some((_, m)) = self.events.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(m.len());
+            } else {
+                break;
+            }
         }
         id
     }
@@ -437,7 +464,7 @@ mod tests {
         let (sid, tokens) = state.sessions.register(None, "rw", None).await.unwrap();
         let token = &tokens[0].0;
 
-        let (atx, mut arx) = mpsc::unbounded_channel::<String>();
+        let (atx, mut arx) = mpsc::channel::<String>(crate::relay::SSE_CHANNEL_CAPACITY);
         let mut cm = ChannelMap::new();
         cm.agent = Some(atx);
         state.agent_broadcast.write().await.insert(sid.clone(), cm);
@@ -463,6 +490,54 @@ mod tests {
         use base64::{engine::general_purpose::STANDARD as B64, Engine};
         let decoded = String::from_utf8(B64.decode(content_b64).unwrap()).unwrap();
         assert_eq!(decoded, "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_upload_handler_chunks_large_file() {
+        // A body larger than one chunk (256 KiB) must arrive as multiple
+        // ordered fs:upload chunks whose reassembled content matches, so no
+        // single giant message is ever put on the relay→agent channel.
+        let state = Arc::new(SharedState::new("".into(), 100 * 1024 * 1024, None, String::new(), String::new(), None));
+        let (sid, tokens) = state.sessions.register(None, "rw", None).await.unwrap();
+        let token = &tokens[0].0;
+
+        let (atx, mut arx) = mpsc::channel::<String>(crate::relay::SSE_CHANNEL_CAPACITY);
+        let mut cm = ChannelMap::new();
+        cm.agent = Some(atx);
+        state.agent_broadcast.write().await.insert(sid.clone(), cm);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {}", token).parse().unwrap());
+        let mut params = HashMap::new();
+        params.insert("path".to_string(), "/tmp/big.bin".to_string());
+
+        // 300 KiB of patterned bytes (> 256 KiB chunk → 2 chunks).
+        let original: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+        let body = Body::from(original.clone());
+        let result = upload_handler(State(state.clone()), headers, Query(params), body).await;
+        assert_eq!(result, Ok(StatusCode::OK));
+
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        let mut reassembled = Vec::new();
+        let mut seen_total: u64 = 0;
+        let mut last_index: i64 = -1;
+        while let Ok(msg) = tokio::time::timeout(std::time::Duration::from_secs(10), arx.recv()).await {
+            let msg = msg.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(v["type"], "fs:upload");
+            let ci = v["payload"]["chunk_index"].as_u64().unwrap();
+            let tc = v["payload"]["total_chunks"].as_u64().unwrap();
+            seen_total = tc;
+            assert_eq!(ci as i64, last_index + 1, "chunks must arrive in order");
+            last_index = ci as i64;
+            let chunk = B64.decode(v["payload"]["content"].as_str().unwrap()).unwrap();
+            reassembled.extend_from_slice(&chunk);
+            if ci + 1 == tc {
+                break;
+            }
+        }
+        assert_eq!(seen_total, 2);
+        assert_eq!(reassembled, original);
     }
 
     // ── EventBuffer tests ───────────────────────────────────────────
@@ -511,6 +586,19 @@ mod tests {
         assert_eq!(replay.len(), 1000);
         // Oldest should have been evicted
         assert_eq!(replay[0].0, 201);
+    }
+
+    #[test]
+    fn test_event_buffer_byte_cap_evicts_oldest() {
+        // A few large messages must not blow past the byte cap; oldest get
+        // evicted so one session's flood can't exhaust relay memory.
+        let mut buf = EventBuffer::new();
+        let big = "x".repeat(MAX_EVENT_BUFFER_BYTES / 2 + 1024);
+        buf.push(big.clone());
+        buf.push(big.clone()); // now over the byte cap → first evicted
+        let replay = buf.replay_from(0);
+        assert_eq!(replay.len(), 1, "byte cap should have evicted the oldest");
+        assert_eq!(replay[0].0, 2);
     }
 }
 
@@ -577,46 +665,98 @@ pub async fn upload_handler(
     }
     drop(file);
 
-    // The agent runs on a different machine than the relay, so it cannot
-    // read a temp file on the relay's filesystem. Read the bytes back and
-    // ship them as base64 in the fs:upload message; the agent decodes and
-    // writes them to final_path directly.
-    let data = match tokio::fs::read(&tmp_path).await {
-        Ok(d) => d,
-        Err(e) => {
+    // The agent runs on a different machine than the relay, so it cannot read
+    // a temp file on the relay's filesystem. Stream the temp file back to the
+    // agent in bounded base64 chunks (default 256 KiB raw → ~341 KiB base64).
+    // Chunking keeps each message small so a transfer can't monopolize a
+    // worker thread with one giant synchronous encode, can't blow the event
+    // buffer's byte cap, and can't head-of-line-block the session's terminal
+    // I/O on the shared relay→agent SSE channel. Sends use backpressure
+    // (send().await on the bounded agent_tx) so a slow agent stalls only this
+    // upload, never other sessions; memory stays flat at one chunk.
+    const CHUNK_SIZE: usize = 256 * 1024;
+
+    let agent_tx = {
+        let broadcast = state.agent_broadcast.read().await;
+        broadcast
+            .get(&session_id)
+            .and_then(|cm| cm.agent.clone())
+    };
+    let agent_tx = match agent_tx {
+        Some(tx) => tx,
+        None => {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            tracing::error!("Upload temp read failed for {}: {}", path, e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
+
+    let file_size = match tokio::fs::metadata(&tmp_path).await {
+        Ok(m) => m.len() as usize,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let upload_id = uuid::Uuid::new_v4().to_string();
+
+    use tokio::io::AsyncReadExt;
+    let mut f = match tokio::fs::File::open(&tmp_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            tracing::error!("Upload temp open failed for {}: {}", path, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut chunk_index: u32 = 0;
+    let send_ok = loop {
+        let n = match f.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("Upload temp read failed for {}: {}", path, e);
+                break false;
+            }
+        };
+        if n == 0 {
+            break true;
+        }
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        let content_b64 = B64.encode(&buf[..n]);
+        let msg = serde_json::json!({
+            "type": "fs:upload",
+            "session_id": session_id,
+            "payload": {
+                "upload_id": upload_id,
+                "final_path": path,
+                "content": content_b64,
+                "chunk_index": chunk_index,
+                "total_chunks": total_chunks,
+            }
+        })
+        .to_string();
+        // Backpressure: if the agent can't keep up, await rather than drop —
+        // dropping a file chunk would silently corrupt the upload.
+        if agent_tx.send(msg).await.is_err() {
+            break false; // agent gone
+        }
+        chunk_index += 1;
+    };
+    drop(f);
     let _ = tokio::fs::remove_file(&tmp_path).await;
 
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    let content_b64 = B64.encode(&data);
-
-    let msg = serde_json::json!({
-        "type": "fs:upload",
-        "session_id": session_id,
-        "payload": {
-            "final_path": path,
-            "content": content_b64
-        }
-    })
-    .to_string();
-
-    {
-        let broadcast = state.agent_broadcast.read().await;
-        if let Some(channel_map) = broadcast.get(&session_id) {
-            if let Some(agent_tx) = &channel_map.agent {
-                let _ = agent_tx.send(msg);
-            }
-        }
+    if !send_ok {
+        tracing::warn!("Upload aborted (agent unreachable mid-transfer): {}", path);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     tracing::info!(
-        "Upload received: {} ({} bytes)",
+        "Upload received: {} ({} bytes, {} chunks)",
         path,
-        total
+        total,
+        chunk_index
     );
     Ok(StatusCode::OK)
 }

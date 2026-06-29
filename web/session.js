@@ -139,6 +139,12 @@
         if (msg.payload._mcp_request_id && files.handleDownloadResult(msg.payload._mcp_request_id, msg.payload)) {
             return;
         }
+        // A chunked-download chunk that doesn't match a pending download here
+        // (e.g. another browser's download broadcast to this session) — ignore
+        // it so it doesn't spuriously refresh this browser's directory listing.
+        if (msg.payload.chunk_index !== undefined) {
+            return;
+        }
         if (Array.isArray(msg.payload.entries)) {
             files.render(msg.payload.entries, msg.payload.path || files.currentPath);
         } else if (msg.payload.success && msg.payload.path) {

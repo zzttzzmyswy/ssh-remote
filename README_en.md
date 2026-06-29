@@ -254,6 +254,17 @@ Token is passed in arguments, not in URL or headers. Commands execute via `sh -c
 | ReadWrite | ✅ | ✅ | ✅ |
 | ReadOnly | ❌ | list/read | ❌ |
 
+## Performance & congestion isolation
+
+To prevent a large file transfer or a flood of terminal logs from making other sessions unresponsive, the relay isolates traffic at several layers:
+
+- **Chunked file transfer**: uploads and downloads are streamed as ≤256KB base64 chunks. No single message is ever large enough to hold a worker thread with one giant synchronous encode or blow up memory.
+- **Bounded channels**: the relay→agent and relay→browser SSE channels are bounded (256 entries). On overflow they drop loss-tolerant terminal-output frames first and keep control/result messages, so a stuck consumer can't grow memory without limit and starve the whole relay.
+- **EventBuffer byte cap**: the per-session replay buffer is capped at 1000 entries *and* 8MB total, so large messages or a sustained log flood can't blow it up.
+- **Backpressure**: upload chunks are sent with backpressure (await, not drop) when the agent falls behind; downloads stream from a dedicated task so they don't block the agent's terminal-input forwarding.
+
+Trade-off: when a session's consumer is badly stuck, that session's transfer may fail or drop frames — but other sessions stay responsive.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -269,7 +280,7 @@ Token is passed in arguments, not in URL or headers. Commands execute via `sh -c
 
 ```bash
 cargo test
-# 155 passed; 0 failed (including integration test)
+# 161 passed; 0 failed (including integration test)
 ```
 
 ## License

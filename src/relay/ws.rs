@@ -7,12 +7,49 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::proto::{requires_write, Message as ProtoMessage, Permission, TokenType};
 
-use crate::relay::{ChannelMap, SharedState, MAX_SESSIONS};
+use crate::relay::{ChannelMap, SharedState, MAX_SESSIONS, SSE_CHANNEL_CAPACITY};
+
+/// Message types that are safe to silently drop when a downstream SSE channel
+/// is full: they are either high-volume output (terminal frames) or state
+/// broadcasts that are superseded by newer ones. Dropping them under a stuck
+/// consumer degrades only that consumer; non-lossy types (input, file chunks,
+/// results, control) are logged when dropped so a stuck session is visible
+/// without stalling other sessions.
+fn is_lossy_msg_type(t: &str) -> bool {
+    matches!(
+        t,
+        "terminal:output"
+            | "terminal:resize"
+            | "session:users"
+            | "session:tab_list"
+            | "session:tab_switched"
+    )
+}
+
+/// Non-blocking delivery to a bounded SSE channel. Never awaits, so it is safe
+/// to call while holding a read lock. On overflow, lossy types are dropped
+/// silently and everything else is dropped with a warning — the alternative
+/// (unbounded buffering) would let one stuck session OOM the whole relay and
+/// stall every other session.
+pub fn deliver(tx: &mpsc::Sender<String>, msg_type: &str, msg: String) {
+    match tx.try_send(msg) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            if !is_lossy_msg_type(msg_type) {
+                tracing::warn!(
+                    "SSE channel full; dropping non-lossy {} message for a stuck/downstream session",
+                    msg_type
+                );
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
 
 // ── Shared agent message routing ─────────────────────────────────────
 
@@ -59,7 +96,7 @@ pub async fn route_agent_message(state: &Arc<SharedState>, session_id: &str, tex
                     for (uid, sse_sid) in &channel_map.browser_sessions {
                         if target_user.is_none_or(|t| t == uid.as_str()) {
                             if let Some(tx) = sse_sessions.get(sse_sid) {
-                                let _ = tx.send(text_str.to_string());
+                                deliver(tx, &proto_msg.msg_type, text_str.to_string());
                             }
                         }
                     }
@@ -334,7 +371,7 @@ pub async fn agent_events_handler(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
 
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::channel::<String>(SSE_CHANNEL_CAPACITY);
 
     {
         let mut broadcast = state.agent_broadcast.write().await;
@@ -360,7 +397,7 @@ pub async fn agent_events_handler(
             }
         }
 
-        let mut rx_stream = UnboundedReceiverStream::new(rx);
+        let mut rx_stream = ReceiverStream::new(rx);
         while let Some(msg) = tokio_stream::StreamExt::next(&mut rx_stream).await {
             let id = state_clone.buffer_agent_event(&sid_clone, &msg).await;
             yield Ok::<_, Infallible>(
@@ -417,7 +454,7 @@ pub async fn browser_sse_handler(
 
     let user_id = Uuid::new_v4().to_string();
     let sse_sid = format!("bs_{}", Uuid::new_v4());
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::channel::<String>(SSE_CHANNEL_CAPACITY);
 
     {
         state.sse_sessions.write().await.insert(sse_sid.clone(), tx);
@@ -446,7 +483,7 @@ pub async fn browser_sse_handler(
         let broadcast = state.agent_broadcast.read().await;
         if let Some(cm) = broadcast.get(&session_id) {
             if let Some(ref agent_tx) = cm.agent {
-                let _ = agent_tx.send(join_msg);
+                deliver(agent_tx, "session:join", join_msg);
             }
         }
     }
@@ -465,7 +502,7 @@ pub async fn browser_sse_handler(
             .to_string();
             for sse_sid_val in cm.browser_sessions.values() {
                 if let Some(stx) = sse_sessions.get(sse_sid_val) {
-                    let _ = stx.send(users_msg.clone());
+                    deliver(stx, "session:users", users_msg.clone());
                 }
             }
         }
@@ -485,7 +522,7 @@ pub async fn browser_sse_handler(
     });
 
     let stream = crate::relay::mcp::SseCleanup {
-        inner: UnboundedReceiverStream::new(rx),
+        inner: ReceiverStream::new(rx),
         state: state.clone(),
         sid: sse_sid.clone(),
         on_drop: Some(Box::new(move || {
@@ -517,7 +554,7 @@ pub async fn browser_sse_handler(
                     if let Some(cm) = broadcast.get(&sid) {
                         for sse_sid_val in cm.browser_sessions.values() {
                             if let Some(stx) = sse_sessions.get(sse_sid_val) {
-                                let _ = stx.send(users_msg.clone());
+                                deliver(stx, "session:users", users_msg.clone());
                             }
                         }
                     }
@@ -533,7 +570,7 @@ pub async fn browser_sse_handler(
                 let broadcast = s.agent_broadcast.read().await;
                 if let Some(cm) = broadcast.get(&sid) {
                     if let Some(ref agent_tx) = cm.agent {
-                        let _ = agent_tx.send(leave_msg);
+                        deliver(agent_tx, "session:leave", leave_msg);
                     }
                 }
             });
@@ -636,7 +673,7 @@ pub async fn browser_send_handler(
         let broadcast = state.agent_broadcast.read().await;
         if let Some(cm) = broadcast.get(&session_id) {
             if let Some(ref agent_tx) = cm.agent {
-                let _ = agent_tx.send(forward_msg);
+                deliver(agent_tx, msg_type, forward_msg);
             }
         }
     }
@@ -659,10 +696,10 @@ mod tests {
         state: &Arc<SharedState>,
         session_id: &str,
     ) -> (
-        mpsc::UnboundedSender<String>,
-        mpsc::UnboundedReceiver<String>,
+        mpsc::Sender<String>,
+        mpsc::Receiver<String>,
     ) {
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let (tx, rx) = mpsc::channel::<String>(SSE_CHANNEL_CAPACITY);
         let mut cm = ChannelMap::new();
         cm.agent = Some(tx.clone());
         state
@@ -677,9 +714,9 @@ mod tests {
         state: &Arc<SharedState>,
         session_id: &str,
         user_id: &str,
-    ) -> mpsc::UnboundedReceiver<String> {
+    ) -> mpsc::Receiver<String> {
         let sse_sid = format!("bs_test_{}", Uuid::new_v4());
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let (tx, rx) = mpsc::channel::<String>(SSE_CHANNEL_CAPACITY);
         state.sse_sessions.write().await.insert(sse_sid.clone(), tx);
         let mut broadcast = state.agent_broadcast.write().await;
         if let Some(cm) = broadcast.get_mut(session_id) {
@@ -689,6 +726,23 @@ mod tests {
     }
 
     // ── route_agent_message tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_deliver_drops_terminal_output_when_full() {
+        // A bounded channel that's full must drop terminal:output silently
+        // (lossy) so a stuck consumer can't stall the producer; non-lossy
+        // messages are also dropped (can't block) but that's the degradation
+        // bound that keeps other sessions alive.
+        let (tx, mut rx) = mpsc::channel::<String>(2);
+        deliver(&tx, "terminal:output", "a".into());
+        deliver(&tx, "terminal:output", "b".into());
+        // Channel now full (cap 2). Third deliver must drop, not block.
+        deliver(&tx, "terminal:output", "c".into());
+        assert_eq!(rx.recv().await.unwrap(), "a");
+        assert_eq!(rx.recv().await.unwrap(), "b");
+        // "c" was dropped; channel is empty now.
+        assert!(rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn test_route_agent_message_broadcasts_to_all_browsers() {

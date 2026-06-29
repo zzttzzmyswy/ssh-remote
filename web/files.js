@@ -186,38 +186,86 @@ class FileManager {
 
     downloadFile(path, name) {
         const dlId = 'dl-' + Date.now();
-        this._pendingDownloads[dlId] = { name };
+        // The agent streams the file as multiple chunked fs:result messages
+        // (256 KiB each) to keep messages small; we reassemble here.
+        this._pendingDownloads[dlId] = { name, chunks: [], total: 0, timer: null };
+        // Safety net: abandon a stalled download so a dropped chunk (slow
+        // browser hitting the relay's bounded channel) doesn't hang forever.
+        this._pendingDownloads[dlId].timer = setTimeout(() => {
+            if (this._pendingDownloads[dlId]) {
+                delete this._pendingDownloads[dlId];
+                this._showToast('下载超时: ' + name);
+            }
+        }, 120000);
         this._showToast('下载中: ' + name);
         window.shellRemote.send('fs:read', { path: path, _mcp_request_id: dlId });
     }
 
     handleDownloadResult(requestId, payload) {
-        if (!this._pendingDownloads[requestId]) return false;
         const info = this._pendingDownloads[requestId];
+        if (!info) return false;
+
+        if (payload.success === false) {
+            clearTimeout(info.timer);
+            delete this._pendingDownloads[requestId];
+            this._showToast('下载失败: ' + (payload.error || info.name));
+            return true;
+        }
+
+        // Chunked path: accumulate base64 chunks until the last, then save.
+        if (payload.chunk_index !== undefined && payload.total_chunks !== undefined) {
+            try {
+                const b64 = payload.content || '';
+                const binaryStr = atob(b64);
+                const bytes = new Uint8Array(binaryStr.length);
+                for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                info.chunks.push(bytes);
+                info.total = payload.total_chunks;
+                if (payload.chunk_index + 1 >= payload.total_chunks) {
+                    clearTimeout(info.timer);
+                    const totalLen = info.chunks.reduce((a, c) => a + c.length, 0);
+                    const all = new Uint8Array(totalLen);
+                    let off = 0;
+                    for (const c of info.chunks) { all.set(c, off); off += c.length; }
+                    delete this._pendingDownloads[requestId];
+                    this._saveBlob(all, payload.name || info.name);
+                }
+            } catch (e) {
+                clearTimeout(info.timer);
+                delete this._pendingDownloads[requestId];
+                console.error('Download reassembly failed:', e);
+            }
+            return true;
+        }
+
+        // Legacy single-message download (fallback).
+        clearTimeout(info.timer);
         delete this._pendingDownloads[requestId];
-        if (payload.success && payload.content) {
+        if (payload.content) {
             try {
                 const binaryStr = atob(payload.content);
                 const bytes = new Uint8Array(binaryStr.length);
-                for (let i = 0; i < binaryStr.length; i++) {
-                    bytes[i] = binaryStr.charCodeAt(i);
-                }
-                const blob = new Blob([bytes]);
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url; a.download = info.name;
-                a.style.display = 'none';
-                document.body.appendChild(a);
-                a.click();
-                setTimeout(() => {
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                }, 100);
+                for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+                this._saveBlob(bytes, payload.name || info.name);
             } catch (e) {
                 console.error('Download failed:', e);
             }
         }
         return true;
+    }
+
+    _saveBlob(bytes, name) {
+        const blob = new Blob([bytes]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 100);
     }
 
     createFolder() {

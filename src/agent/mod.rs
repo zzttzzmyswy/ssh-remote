@@ -4,7 +4,7 @@ pub mod fs;
 pub mod shell;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -27,6 +27,14 @@ struct TabState {
     shell: Shell,
     title: String,
     output_buf: Vec<u8>,
+}
+
+/// In-flight chunked-upload reassembly state. Holds the open destination file
+/// across chunk messages so each chunk's decoded bytes append in order; the
+/// last chunk flushes/closes and emits the fs:result reply.
+struct UploadReassembly {
+    file: std::fs::File,
+    final_path: String,
 }
 
 /// Outbound message handle. The main loop never blocks on HTTP: terminal
@@ -126,6 +134,197 @@ async fn post_raw(client: &reqwest::Client, send_url: &str, text: &str) {
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("Agent POST send error: {}", e),
+    }
+}
+
+/// Post a single error `fs:result` (correlated by `_mcp_request_id`) for a
+/// failed download.
+async fn post_fs_err(
+    client: &reqwest::Client,
+    send_url: &str,
+    session_id: &str,
+    path: &str,
+    mcp_request_id: &Option<String>,
+    err: &str,
+) {
+    let payload = serde_json::json!({
+        "success": false, "error": err, "path": path,
+        "_mcp_request_id": mcp_request_id.clone()
+    });
+    let msg = serde_json::json!({"type":"fs:result","session_id":session_id,"payload":payload}).to_string();
+    post_raw(client, send_url, &msg).await;
+}
+
+/// Stream a file to the relay as chunked `fs:result` messages (one base64
+/// chunk per POST), correlated by `_mcp_request_id`. Runs in its own task so
+/// a large/slow download can't block the agent's main message loop (and thus
+/// terminal input). Each message stays small so the relay can't be held by a
+/// single giant message, and backpressure flows through the HTTP POST.
+async fn stream_file_download(
+    client: reqwest::Client,
+    send_url: String,
+    session_id: String,
+    root: PathBuf,
+    path: String,
+    mcp_request_id: Option<String>,
+) {
+    const CHUNK_SIZE: usize = 256 * 1024;
+    use std::io::Read;
+
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download")
+        .to_string();
+
+    let resolved = match crate::agent::fs::resolve_path(&root, &path) {
+        Some(p) => p,
+        None => {
+            post_fs_err(&client, &send_url, &session_id, &path, &mcp_request_id, "Invalid path").await;
+            return;
+        }
+    };
+
+    let meta = match std::fs::metadata(&resolved) {
+        Ok(m) => m,
+        Err(e) => {
+            post_fs_err(&client, &send_url, &session_id, &path, &mcp_request_id, &format!("Failed to read file: {}", e)).await;
+            return;
+        }
+    };
+    if meta.is_dir() {
+        post_fs_err(&client, &send_url, &session_id, &path, &mcp_request_id, "Path is a directory").await;
+        return;
+    }
+    let file_size = meta.len() as usize;
+    let total_chunks = (((file_size + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32).max(1);
+
+    let mut f = match std::fs::File::open(&resolved) {
+        Ok(f) => f,
+        Err(e) => {
+            post_fs_err(&client, &send_url, &session_id, &path, &mcp_request_id, &format!("Failed to open file: {}", e)).await;
+            return;
+        }
+    };
+
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut idx: u32 = 0;
+    loop {
+        let n = match f.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                post_fs_err(&client, &send_url, &session_id, &path, &mcp_request_id, &format!("Failed to read file: {}", e)).await;
+                return;
+            }
+        };
+        let content_b64 = crate::agent::fs::encode_b64(&buf[..n]);
+        let payload = serde_json::json!({
+            "success": true,
+            "content": content_b64,
+            "chunk_index": idx,
+            "total_chunks": total_chunks,
+            "name": name,
+            "path": path,
+            "_mcp_request_id": mcp_request_id.clone()
+        });
+        let msg = serde_json::json!({"type":"fs:result","session_id":session_id,"payload":payload}).to_string();
+        post_raw(&client, &send_url, &msg).await;
+        idx += 1;
+        if idx >= total_chunks {
+            break;
+        }
+        if n == 0 {
+            // file exhausted before total_chunks (size shrank mid-read) — stop
+            break;
+        }
+    }
+}
+
+/// Assemble one base64 chunk of a chunked upload into `final_path`.
+///
+/// Chunk 0 opens (truncating) the destination and writes; subsequent chunks
+/// append to the open file held in `reassembly` (keyed by `upload_id`); the
+/// last chunk flushes, closes, and returns a terminal result. Returns
+/// `(result, more_expected)` — when `more_expected` is true the caller should
+/// wait for the final chunk before emitting `fs:result`.
+fn assemble_upload_chunk(
+    reassembly: &mut HashMap<String, UploadReassembly>,
+    root: &Path,
+    upload_id: &str,
+    final_path: &str,
+    content_b64: &str,
+    chunk_index: u32,
+    total_chunks: u32,
+) -> (crate::proto::FsResultPayload, bool) {
+    use std::io::Write;
+    let is_last = total_chunks > 0 && chunk_index + 1 >= total_chunks;
+    let decoded_opt = crate::agent::fs::decode_b64(content_b64);
+
+    let err = |msg: &str| crate::proto::FsResultPayload {
+        success: false,
+        error: Some(msg.to_string()),
+        entries: None, content: None,
+        path: Some(final_path.to_string()), new_path: None,
+    };
+    let ok = || crate::proto::FsResultPayload {
+        success: true, error: None,
+        entries: None, content: None,
+        path: Some(final_path.to_string()), new_path: None,
+    };
+
+    if chunk_index == 0 {
+        match decoded_opt {
+            None => (err("Invalid base64 content"), false),
+            Some(decoded) => match crate::agent::fs::resolve_path(root, final_path) {
+                None => (err("Invalid destination path"), false),
+                Some(p) => match std::fs::OpenOptions::new()
+                    .create(true).write(true).truncate(true).open(&p)
+                {
+                    Err(e) => (err(&format!("Failed to open destination: {}", e)), false),
+                    Ok(mut f) => {
+                        if f.write_all(&decoded).is_err() {
+                            (err("Failed to write uploaded chunk"), false)
+                        } else if is_last {
+                            let _ = f.sync_all();
+                            (ok(), false)
+                        } else {
+                            reassembly.insert(upload_id.to_string(), UploadReassembly {
+                                file: f,
+                                final_path: final_path.to_string(),
+                            });
+                            (ok(), true)
+                        }
+                    }
+                }
+            },
+        }
+    } else {
+        match decoded_opt {
+            None => (err("Invalid base64 content"), false),
+            Some(decoded) => match reassembly.remove(upload_id) {
+                None => (err("Upload chunk received without a preceding chunk 0"), false),
+                Some(mut st) => {
+                    let fp = st.final_path.clone();
+                    if st.file.write_all(&decoded).is_err() {
+                        (err("Failed to write uploaded chunk"), false)
+                    } else if is_last {
+                        let _ = st.file.sync_all();
+                        (crate::proto::FsResultPayload {
+                            success: true, error: None,
+                            entries: None, content: None,
+                            path: Some(fp), new_path: None,
+                        }, false)
+                    } else {
+                        reassembly.insert(upload_id.to_string(), st);
+                        (crate::proto::FsResultPayload {
+                            success: true, error: None,
+                            entries: None, content: None,
+                            path: Some(fp), new_path: None,
+                        }, true)
+                    }
+                }
+            },
+        }
     }
 }
 
@@ -266,6 +465,12 @@ async fn run_session(
         payload: serde_json::json!({ "tab_id": active_tab_id }),
     };
     out.control(sw_msg).await;
+
+    // In-flight chunked upload reassembly, keyed by upload_id. Chunks for a
+    // transfer arrive interleaved with other messages on the SSE stream, so
+    // we keep an open file handle per upload_id and append each decoded
+    // chunk; the last chunk flushes, closes, and replies.
+    let mut upload_reassembly: HashMap<String, UploadReassembly> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -442,17 +647,23 @@ async fn run_session(
                                 }
 
                                 "fs:read" => {
-                                    let path = msg.payload["path"].as_str().unwrap_or("");
+                                    let path = msg.payload["path"].as_str().unwrap_or("").to_string();
                                     let mcp_request_id = msg.payload["_mcp_request_id"].as_str().map(|s| s.to_string());
-                                    let result = fs::read_file(&root_path, path);
-                                    let mut payload = serde_json::to_value(&result).unwrap();
-                                    if let (Some(req_id), serde_json::Value::Object(ref mut map)) =
-                                        (mcp_request_id, &mut payload)
-                                    {
-                                        map.insert("_mcp_request_id".to_string(), serde_json::Value::String(req_id));
-                                    }
-                                    let resp = Message { msg_type: "fs:result".to_string(), session_id: client.session_id.clone(), payload };
-                                    out.control(resp).await;
+                                    // Stream the file as chunked fs:result messages
+                                    // in a separate task so a large/slow download
+                                    // can't block the main loop (terminal input).
+                                    let client_req = client.http_client().clone();
+                                    let send_url = client.send_url().to_string();
+                                    let sid = client.session_id.clone();
+                                    let root_clone = root_path.clone();
+                                    tokio::spawn(stream_file_download(
+                                        client_req,
+                                        send_url,
+                                        sid,
+                                        root_clone,
+                                        path,
+                                        mcp_request_id,
+                                    ));
                                 }
 
                                 "fs:write" => {
@@ -471,14 +682,30 @@ async fn run_session(
                                 }
 
                                 "fs:upload" => {
-                                    let final_path = msg.payload["final_path"].as_str().unwrap_or("");
+                                    // Chunked reassembly (see assemble_upload_chunk).
+                                    // Keeps each message small so a big upload
+                                    // can't block terminal I/O or blow memory.
+                                    let upload_id = msg.payload["upload_id"].as_str().unwrap_or("").to_string();
+                                    let final_path = msg.payload["final_path"].as_str().unwrap_or("").to_string();
                                     let content_b64 = msg.payload["content"].as_str().unwrap_or("");
+                                    let chunk_index = msg.payload["chunk_index"].as_u64().unwrap_or(0) as u32;
+                                    let total_chunks = msg.payload["total_chunks"].as_u64().unwrap_or(0) as u32;
                                     let mcp_request_id = msg.payload["_mcp_request_id"].as_str().map(|s| s.to_string());
 
-                                    // The relay base64-encodes the uploaded bytes and
-                                    // ships them in `content` (it can't hand the agent a
-                                    // temp_path — they run on different machines).
-                                    let result = fs::write_file(&root_path, final_path, content_b64);
+                                    let (result, more_expected) = assemble_upload_chunk(
+                                        &mut upload_reassembly,
+                                        &root_path,
+                                        &upload_id,
+                                        &final_path,
+                                        content_b64,
+                                        chunk_index,
+                                        total_chunks,
+                                    );
+
+                                    if more_expected {
+                                        // More chunks pending; don't emit fs:result yet.
+                                        continue;
+                                    }
                                     let mut payload = serde_json::to_value(&result).unwrap();
                                     if let (Some(req_id), serde_json::Value::Object(ref mut map)) =
                                         (mcp_request_id, &mut payload)
@@ -757,6 +984,74 @@ async fn execute_command(cmd: &str, timeout_ms: u64, shell: &str) -> (String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_assemble_upload_chunk_reassembles_multiple_chunks() {
+        // Feed a 3-chunk upload through the reassembly state machine and
+        // verify the final file equals the concatenation, only the last
+        // chunk produces a terminal result, and intermediate chunks ask for
+        // more (no premature fs:result).
+        let tmp = std::env::temp_dir().join(format!("sr-upload-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let root = tmp.clone();
+        let dest = root.join("out.bin");
+        let final_path = dest.to_string_lossy().to_string();
+
+        let mut reassembly: HashMap<String, UploadReassembly> = HashMap::new();
+        let chunks: Vec<Vec<u8>> = vec![vec![1; 100_000], vec![2; 100_000], vec![3; 50_000]];
+        let total = chunks.len() as u32;
+        let mut got_terminal = false;
+        for (i, ch) in chunks.iter().enumerate() {
+            let b64 = crate::agent::fs::encode_b64(ch);
+            let (res, more) = assemble_upload_chunk(
+                &mut reassembly, &root, "uid-1", &final_path, &b64, i as u32, total,
+            );
+            if i as u32 + 1 == total {
+                assert!(!more, "last chunk must be terminal");
+                assert!(res.success, "last chunk success");
+                got_terminal = true;
+            } else {
+                assert!(more, "intermediate chunk must expect more");
+            }
+        }
+        assert!(got_terminal);
+        assert!(reassembly.is_empty(), "final state should be consumed");
+
+        let written = std::fs::read(&dest).unwrap();
+        let mut expected = Vec::new();
+        for ch in &chunks { expected.extend_from_slice(ch); }
+        assert_eq!(written, expected);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_assemble_upload_chunk_single_chunk() {
+        let tmp = std::env::temp_dir().join(format!("sr-upload-single-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let root = tmp.clone();
+        let dest = root.join("one.bin");
+        let final_path = dest.to_string_lossy().to_string();
+        let mut reassembly: HashMap<String, UploadReassembly> = HashMap::new();
+        let b64 = crate::agent::fs::encode_b64(b"hello");
+        let (res, more) = assemble_upload_chunk(&mut reassembly, &root, "uid-2", &final_path, &b64, 0, 1);
+        assert!(!more);
+        assert!(res.success);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_assemble_upload_chunk_missing_chunk0_errors() {
+        let tmp = std::env::temp_dir().join(format!("sr-upload-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut reassembly: HashMap<String, UploadReassembly> = HashMap::new();
+        let b64 = crate::agent::fs::encode_b64(b"x");
+        let (res, more) = assemble_upload_chunk(&mut reassembly, &tmp, "uid-3", "/tmp/none", &b64, 1, 2);
+        assert!(!more);
+        assert!(!res.success);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn test_output_coalescing_per_tab() {

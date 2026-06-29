@@ -113,6 +113,7 @@ pub fn list_dir(root: &Path, user_path: &str) -> FsResultPayload {
     }
 }
 
+#[allow(dead_code)]
 pub fn read_file(root: &Path, user_path: &str) -> FsResultPayload {
     let path = match resolve_path(root, user_path) {
         Some(p) => p,

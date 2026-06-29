@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use uuid::Uuid;
@@ -18,7 +18,7 @@ use crate::proto::{Message as ProtoMessage, Permission};
 use crate::relay::SharedState;
 
 pub(crate) struct SseCleanup {
-    pub inner: UnboundedReceiverStream<String>,
+    pub inner: ReceiverStream<String>,
     pub state: Arc<SharedState>,
     pub sid: String,
     pub on_drop: Option<Box<dyn FnOnce() + Send + 'static>>,
@@ -73,7 +73,7 @@ pub async fn sse_handler(
     }
 
     let mcp_session_id = Uuid::new_v4().to_string();
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::channel::<String>(crate::relay::SSE_CHANNEL_CAPACITY);
 
     {
         let mut channels = state.sse_sessions.write().await;
@@ -87,7 +87,7 @@ pub async fn sse_handler(
             .data(format!("/agent/mcp/messages?sessionId={}", sid_for_stream)));
 
         let rx_stream = SseCleanup {
-            inner: UnboundedReceiverStream::new(rx),
+            inner: ReceiverStream::new(rx),
             state: state.clone(),
             sid: mcp_session_id,
             on_drop: None,
@@ -179,7 +179,7 @@ pub async fn messages_handler(
     tokio::spawn(async move {
         if let Some(result) = process_mcp_request(&state_clone, url_token, &body_clone).await {
             let response_text = serde_json::to_string(&result).unwrap_or_default();
-            let _ = sse_tx.send(response_text);
+            crate::relay::ws::deliver(&sse_tx, "message", response_text);
         }
     });
 
@@ -315,8 +315,11 @@ async fn process_mcp_request(
                 };
                 match agent_tx_option {
                     Some(agent_tx) => {
-                        let _ =
-                            agent_tx.send(serde_json::to_string(&proto_msg).unwrap_or_default());
+                        crate::relay::ws::deliver(
+                            &agent_tx,
+                            "mcp:exec",
+                            serde_json::to_string(&proto_msg).unwrap_or_default(),
+                        );
                     }
                     None => {
                         state.pending_mcp.write().await.remove(&mcp_req_id);
@@ -380,7 +383,7 @@ mod tests {
         params: HashMap<String, String>,
         body: Value,
     ) -> Value {
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = mpsc::channel::<String>(crate::relay::SSE_CHANNEL_CAPACITY);
         let sid = uuid::Uuid::new_v4().to_string();
         state.sse_sessions.write().await.insert(sid.clone(), tx);
         let mut p = params;
@@ -490,7 +493,7 @@ mod tests {
         // The MCP client sends notifications/initialized after initialize;
         // responding would force id:null which the SDK rejects.
         let state = make_state();
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = mpsc::channel::<String>(crate::relay::SSE_CHANNEL_CAPACITY);
         let sid = uuid::Uuid::new_v4().to_string();
         state.sse_sessions.write().await.insert(sid.clone(), tx);
 
