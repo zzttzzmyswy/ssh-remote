@@ -350,14 +350,11 @@ pub async fn start(
             &token_type,
             &shell_path,
             session_id.as_deref(),
-            cached_tokens.as_deref(),
+            &mut cached_tokens,
         )
         .await
         {
-            Ok(tokens) => {
-                if let Some(t) = tokens {
-                    cached_tokens = Some(t);
-                }
+            Ok(()) => {
                 tracing::warn!("Agent session ended, reconnecting in {:?}...", delay);
             }
             Err(e) => {
@@ -376,17 +373,36 @@ async fn run_session(
     token_type: &str,
     shell_path: &str,
     session_id: Option<&str>,
-    cached_tokens: Option<&[(String, String)]>,
-) -> anyhow::Result<Option<Vec<(String, String)>>> {
+    cached_tokens: &mut Option<Vec<(String, String)>>,
+) -> anyhow::Result<()> {
+    // Validate the root directory BEFORE registering with the relay. A bad
+    // root must fail fast without minting a session — otherwise the relay
+    // keeps a ghost session entry that blocks re-registration with the same
+    // --session-id (HTTP 409) on every reconnect attempt.
+    let root_path = PathBuf::from(root);
+    if !root_path.is_dir() {
+        anyhow::bail!(
+            "Root directory does not exist or is not a directory: {}",
+            root
+        );
+    }
+
     let mut client = RelayClient::connect_with_retry(
         relay_url,
         key.clone(),
         token_type,
         session_id,
-        cached_tokens,
+        cached_tokens.as_deref(),
         10,
     )
     .await?;
+
+    // Cache the tokens the moment registration succeeds — before anything
+    // later in this function can bail (e.g. shell spawn failure). On the next
+    // reconnect, `connect_with_retry` replays them so the relay takes the
+    // `register_existing` path, which evicts this session's stale prior
+    // incarnation instead of rejecting with 409 "session_id already in use".
+    *cached_tokens = Some(client.tokens.clone());
 
     tracing::info!(session = %client.session_id, "agent session established");
     for (token, perm) in &client.tokens {
@@ -412,13 +428,6 @@ async fn run_session(
     // Keep a control sender for spawned long-running tasks (e.g. mcp:exec).
     let task_control_tx = control_tx;
 
-    let root_path = PathBuf::from(root);
-    if !root_path.is_dir() {
-        anyhow::bail!(
-            "Root directory does not exist or is not a directory: {}",
-            root
-        );
-    }
     let exec_sessions = crate::agent::exec_sessions::ExecSessionManager::new();
 
     let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
@@ -875,8 +884,9 @@ async fn run_session(
     exec_sessions.shutdown_all().await;
     tabs.clear(); // Drop all tabs - shells kill child processes via Drop
 
-    // Return the tokens used this session so `start` can replay them on reconnect.
-    Ok(Some(client.tokens.clone()))
+    // Tokens were already cached into `cached_tokens` right after registration,
+    // so `start` can replay them on reconnect — nothing to return here.
+    Ok(())
 }
 
 #[cfg(unix)]

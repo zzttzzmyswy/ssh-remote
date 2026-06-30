@@ -663,6 +663,16 @@ pub async fn upload_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     }
+    // Flush + sync before reopening for reading. tokio::fs writes are
+    // dispatched to a blocking pool; without an explicit sync the file's
+    // on-disk size can lag the bytes we already counted (observed as a
+    // short-read race under load), which would make the chunker compute the
+    // wrong total and silently truncate the upload.
+    {
+        use tokio::io::AsyncWriteExt;
+        let _ = file.flush().await;
+        let _ = file.sync_all().await;
+    }
     drop(file);
 
     // The agent runs on a different machine than the relay, so it cannot read
@@ -690,13 +700,10 @@ pub async fn upload_handler(
         }
     };
 
-    let file_size = match tokio::fs::metadata(&tmp_path).await {
-        Ok(m) => m.len() as usize,
-        Err(_) => {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+    // The stream already counted every byte received; use that as the
+    // authoritative size rather than re-stat'ing the file (a stat can race
+    // the sync above and under-report on some filesystems).
+    let file_size = total as usize;
     let total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
     let upload_id = uuid::Uuid::new_v4().to_string();
 

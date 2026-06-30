@@ -280,7 +280,7 @@ Trade-off: when a session's consumer is badly stuck, that session's transfer may
 
 ```bash
 cargo test
-# 161 passed; 0 failed (including integration test)
+# 162 passed; 0 failed (including integration test)
 ```
 
 ## License

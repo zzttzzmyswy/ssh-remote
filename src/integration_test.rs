@@ -7,6 +7,92 @@ mod integration_tests {
     use crate::relay::mcp;
     use crate::relay::ws;
 
+    /// Build a minimal relay router over a fresh shared state, for tests that
+    /// only need the agent POST endpoints (no recording, no admin).
+    fn relay_app() -> Arc<crate::relay::SharedState> {
+        Arc::new(crate::relay::SharedState::new(
+            String::new(),
+            100 * 1024 * 1024,
+            None,
+            String::new(),
+            String::new(),
+            None,
+        ))
+    }
+
+    /// Regression for the "ghost session blocks re-registration with 409" bug.
+    ///
+    /// Scenario reported by a user: an agent with `--session-id seSupportBot`
+    /// registers successfully (relay mints a token and stores the session),
+    /// then fails locally (e.g. root dir missing) and reconnects. Because the
+    /// relay still holds the prior session entry, a fresh `register` for the
+    /// same id returns 409 "session_id already in use". The fix is for the
+    /// agent to replay its cached token on reconnect, which routes through
+    /// `register_existing` and evicts the stale entry. This test pins the
+    /// relay behavior that makes that recovery work.
+    #[tokio::test]
+    async fn test_ghost_session_reclaimed_by_cached_token_reconnect() {
+        let state = relay_app();
+        use axum::routing::get;
+        use axum::Router;
+        let app = Router::new()
+            .route("/agent/send", axum::routing::post(ws::agent_send_handler))
+            .route("/agent/events", get(ws::agent_events_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _server = tokio::spawn(async move { axum::serve(listener, app).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let relay_url = format!("http://127.0.0.1:{}", port);
+        let client = reqwest::Client::new();
+
+        // 1. First registration with a custom session id — succeeds, mints T.
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"agent:register","token_type":"rw","session_id":"seSupportBot"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let reg: Value = resp.json().await.unwrap();
+        assert_eq!(reg["session_id"], "seSupportBot");
+        let token = reg["payload"]["tokens"][0]["token"].as_str().unwrap().to_string();
+
+        // 2. A *fresh* re-registration for the same id (no cached tokens) is
+        //    rejected with 409 — the ghost entry is still live. This is the
+        //    exact error the user saw.
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"agent:register","token_type":"rw","session_id":"seSupportBot"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409, "fresh re-register must hit 409 (ghost live)");
+
+        // 3. Re-registration replaying the cached token routes through
+        //    register_existing, recognizes the stale incarnation as the same
+        //    logical session, evicts it, and succeeds. This is the path the
+        //    agent takes after caching its tokens across a local failure.
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({
+                "type":"agent:register",
+                "tokens":[{"token":token,"permission":"rw"}],
+                "session_id":"seSupportBot"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "cached-token reconnect must evict ghost and succeed");
+        let reg: Value = resp.json().await.unwrap();
+        assert_eq!(reg["session_id"], "seSupportBot");
+        // The replayed token is reused verbatim.
+        assert_eq!(reg["payload"]["tokens"][0]["token"], token);
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_full_workflow() {
