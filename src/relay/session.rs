@@ -73,7 +73,37 @@ impl SessionRegistry {
         {
             let mut sessions = self.sessions.write().await;
             if sessions.contains_key(&session_id) {
-                return Err(RegisterError::IdTaken);
+                // Reclaim across a process restart: if any of the tokens we're
+                // about to install already maps to the existing session (i.e.
+                // a fixed key being re-used by the same agent restarting with
+                // the same --key + --session-id), evict the stale incarnation
+                // and re-register instead of rejecting with 409. Without this
+                // an agent restarted with a fixed key could never reclaim its
+                // id — its ghost session lingers in the registry until idle-
+                // reaped, so every fresh `register` hits IdTaken. A random-
+                // token agent that lost its tokens on restart can't prove
+                // ownership (its new random token doesn't map to the existing
+                // session) and still gets IdTaken, which is the safe behavior.
+                let same_agent = {
+                    let tmap = self.token_map.read().await;
+                    tokens.iter().any(|(t, _)| {
+                        tmap.get(t)
+                            .map(|(sid, _)| sid == &session_id)
+                            .unwrap_or(false)
+                    })
+                };
+                if !same_agent {
+                    return Err(RegisterError::IdTaken);
+                }
+                // Evict the stale prior incarnation: drop the old session
+                // entry and clear its tokens from the token_map so the new
+                // minted set replaces them cleanly.
+                if let Some(old_info) = sessions.remove(&session_id) {
+                    let mut tmap = self.token_map.write().await;
+                    for (t, _) in &old_info.tokens {
+                        tmap.remove(t);
+                    }
+                }
             }
             sessions.insert(
                 session_id.clone(),
@@ -393,6 +423,79 @@ mod tests {
         let _ = registry.register(None, "rw", Some("mydev01".to_string())).await.unwrap();
         let err = registry.register(None, "rw", Some("mydev01".to_string())).await.unwrap_err();
         assert!(matches!(err, RegisterError::IdTaken));
+    }
+
+    #[tokio::test]
+    async fn test_register_fixed_key_reclaims_id_after_restart() {
+        // An agent restarted with the same --key + --session-id must reclaim
+        // its id (evict the ghost from the prior incarnation), not 409. This
+        // is the user-reported scenario: fixed key + fixed session id still
+        // hit "session_id already in use" across a process restart.
+        let registry = SessionRegistry::new();
+        let (sid1, t1) = registry
+            .register(Some("fixed-key-X".to_string()), "rw", Some("dev01".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(sid1, "dev01");
+        assert_eq!(t1[0].0, "fixed-key-X");
+
+        // A fresh process re-registering with the same key + id: must succeed
+        // (evicts the stale prior incarnation) instead of IdTaken.
+        let (sid2, t2) = registry
+            .register(Some("fixed-key-X".to_string()), "rw", Some("dev01".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(sid2, "dev01");
+        assert_eq!(t2[0].0, "fixed-key-X");
+        // The fixed key still authenticates to the (reclaimed) session.
+        let (resolved, _) = registry.authenticate("fixed-key-X").await.unwrap();
+        assert_eq!(resolved, "dev01");
+    }
+
+    #[tokio::test]
+    async fn test_register_different_fixed_key_conflict() {
+        // A different agent (different fixed key) trying to claim an in-use id
+        // is still rejected — only the same key can reclaim.
+        let registry = SessionRegistry::new();
+        let _ = registry
+            .register(Some("key-A".to_string()), "rw", Some("dev01".to_string()))
+            .await
+            .unwrap();
+        let err = registry
+            .register(Some("key-B".to_string()), "rw", Some("dev01".to_string()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RegisterError::IdTaken));
+        // Original key still owns the session.
+        let (resolved, _) = registry.authenticate("key-A").await.unwrap();
+        assert_eq!(resolved, "dev01");
+    }
+
+    #[tokio::test]
+    async fn test_register_fixed_key_both_reclaims_and_rotates_ro() {
+        // token_type=both: the fixed rw key reclaims the id; the random ro
+        // token is rotated (old one invalidated, new one minted).
+        let registry = SessionRegistry::new();
+        let (_sid, t1) = registry
+            .register(Some("fixed".to_string()), "both", Some("dev01".to_string()))
+            .await
+            .unwrap();
+        let old_ro = t1.iter().find(|(_, p)| *p == Permission::ReadOnly).unwrap().0.clone();
+        assert!(registry.authenticate(&old_ro).await.is_some());
+
+        let (_sid, t2) = registry
+            .register(Some("fixed".to_string()), "both", Some("dev01".to_string()))
+            .await
+            .unwrap();
+        let new_ro = t2.iter().find(|(_, p)| *p == Permission::ReadOnly).unwrap().0.clone();
+        assert_ne!(old_ro, new_ro);
+        // Old ro token invalidated by the eviction.
+        assert!(registry.authenticate(&old_ro).await.is_none());
+        // Fixed rw key + new ro both authenticate to the reclaimed session.
+        let (r1, _) = registry.authenticate("fixed").await.unwrap();
+        let (r2, _) = registry.authenticate(&new_ro).await.unwrap();
+        assert_eq!(r1, "dev01");
+        assert_eq!(r2, "dev01");
     }
 
     #[tokio::test]

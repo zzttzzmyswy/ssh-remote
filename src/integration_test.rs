@@ -93,6 +93,71 @@ mod integration_tests {
         assert_eq!(reg["payload"]["tokens"][0]["token"], token);
     }
 
+    /// Regression for the user-reported scenario that the v0.10.1 fix missed:
+    /// an agent started with `--key <fixed> --session-id <id>` (NOT cached
+    /// tokens) that **restarts as a fresh process**. The new process has no
+    /// cached tokens, so it sends a plain `agent:register` with `key` + the
+    /// same `session_id`. The relay still holds the prior incarnation's ghost
+    /// (the old process died without cleanly disconnecting), so the fresh
+    /// register must reclaim the id via the fixed key — not 409.
+    #[tokio::test]
+    async fn test_fixed_key_register_reclaims_id_across_process_restart() {
+        let state = relay_app();
+        use axum::Router;
+        let app = Router::new()
+            .route("/agent/send", axum::routing::post(ws::agent_send_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _server = tokio::spawn(async move { axum::serve(listener, app).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let relay_url = format!("http://127.0.0.1:{}", port);
+        let client = reqwest::Client::new();
+
+        // Process 1: register with a fixed key + custom id. Succeeds.
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"agent:register","key":"fixed-key-Z","token_type":"rw","session_id":"seSupportBot"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let reg: Value = resp.json().await.unwrap();
+        assert_eq!(reg["session_id"], "seSupportBot");
+        assert_eq!(reg["payload"]["tokens"][0]["token"], "fixed-key-Z");
+
+        // Process 1 dies (no clean disconnect) — the ghost stays in the
+        // registry. Process 2 starts fresh: NO cached tokens, same key + id.
+        // Before the fix this returned 409 "session_id already in use".
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"agent:register","key":"fixed-key-Z","token_type":"rw","session_id":"seSupportBot"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "fixed-key register across a process restart must reclaim the id, not 409"
+        );
+        let reg: Value = resp.json().await.unwrap();
+        assert_eq!(reg["session_id"], "seSupportBot");
+        assert_eq!(reg["payload"]["tokens"][0]["token"], "fixed-key-Z");
+
+        // A *different* fixed key trying to claim the same in-use id is still
+        // rejected — only the same key can reclaim.
+        let resp = client
+            .post(format!("{}/agent/send", relay_url))
+            .json(&json!({"type":"agent:register","key":"intruder-key","token_type":"rw","session_id":"seSupportBot"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409, "a different key must not steal the id");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_full_workflow() {
